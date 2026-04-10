@@ -11,29 +11,29 @@ default_host: docker-server
 
 hosts:
   docker-server:
-    hostname: 192.168.0.231   # IP or resolvable hostname
-    user: skip
+    hostname: 192.168.1.100   # IP or resolvable hostname
+    user: myuser
     key_path: /keys/id_rsa    # path inside the container (mounted from ./keys/)
     # port: 22                # optional, defaults to 22
 
   nas:
-    hostname: 192.168.0.2
-    user: skip
+    hostname: 192.168.1.101
+    user: myuser
     key_path: /keys/id_rsa
 
-  proxmox1:
-    hostname: 192.168.0.203
+  proxmox:
+    hostname: 192.168.1.102
     user: root
     key_path: /keys/id_rsa_proxmox
 
-  smavm:
-    hostname: 192.168.0.181
-    user: skip
+  vm1:
+    hostname: 192.168.1.103
+    user: myuser
     key_path: /keys/id_rsa
 
-  plex:
-    hostname: 192.168.0.84
-    user: skip
+  mediaserver:
+    hostname: 192.168.1.104
+    user: myuser
     key_path: /keys/id_rsa
 
 # Optional: restrict which base commands ssh_exec is allowed to run.
