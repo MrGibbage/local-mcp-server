@@ -1,0 +1,17 @@
+services:
+  homelab-mcp:
+    build: .
+    container_name: homelab-mcp
+    restart: unless-stopped
+    ports:
+      - "8080:8080"        # change left side to move the host port
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./keys:/keys:ro    # SSH private keys — see README for setup
+      # Uncomment if you want the MCP server to also manage Docker on THIS host:
+      # - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - CONFIG_PATH=/app/config.yaml
+    # Optional: override port without rebuilding
+    # environment:
+    #   - MCP_PORT=9090

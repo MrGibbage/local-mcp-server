@@ -1,0 +1,50 @@
+# Homelab MCP Server — example configuration
+# Copy this to config.yaml and fill in your values.
+# config.yaml is gitignored so secrets stay local.
+
+server:
+  host: "0.0.0.0"   # bind address — keep this LAN-only, never expose to internet
+  port: 8080
+
+# The host used when a tool is called without an explicit host argument.
+default_host: docker-server
+
+hosts:
+  docker-server:
+    hostname: 192.168.0.231   # IP or resolvable hostname
+    user: skip
+    key_path: /keys/id_rsa    # path inside the container (mounted from ./keys/)
+    # port: 22                # optional, defaults to 22
+
+  nas:
+    hostname: 192.168.0.2
+    user: skip
+    key_path: /keys/id_rsa
+
+  proxmox1:
+    hostname: 192.168.0.203
+    user: root
+    key_path: /keys/id_rsa_proxmox
+
+  smavm:
+    hostname: 192.168.0.181
+    user: skip
+    key_path: /keys/id_rsa
+
+  plex:
+    hostname: 192.168.0.84
+    user: skip
+    key_path: /keys/id_rsa
+
+# Optional: restrict which base commands ssh_exec is allowed to run.
+# Comment out this block (or set to null) to allow all commands.
+# The check matches the first word of the command against this list.
+#
+# ssh_command_allowlist:
+#   - docker
+#   - systemctl
+#   - df
+#   - free
+#   - cat
+#   - ls
+#   - journalctl
