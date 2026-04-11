@@ -46,7 +46,7 @@ ALLOWLIST: list[str] | None = CONFIG.get("ssh_command_allowlist")  # None = unre
 # FastMCP initialisation
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("Homelab MCP", host=HOST, port=PORT)
+mcp = FastMCP("Homelab MCP", host=HOST, port=PORT, auth=None)
 
 # ---------------------------------------------------------------------------
 # SSH helpers
@@ -410,11 +410,103 @@ def memory_usage(host: Optional[str] = None) -> dict:
     except ValueError as exc:
         return {"stdout": "", "stderr": str(exc), "exit_code": -1}
 
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print(f"Starting Homelab MCP server on {HOST}:{PORT} (SSE transport)", flush=True)
-    mcp.run(transport="sse")
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, RedirectResponse
+    from starlette.routing import Mount, Route
+
+    BASE_URL = "https://homelab-mcp.pelorus.org"
+
+    class StripAuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            print(f"MIDDLEWARE: {request.method} {request.url.path}", flush=True)
+            scope = request.scope
+            scope["headers"] = [
+                (k, v) for k, v in scope.get("headers", [])
+                if k.lower() != b"authorization"
+            ]
+            return await call_next(request)
+
+    async def oauth_protected_resource(request: Request) -> JSONResponse:
+        return JSONResponse({
+            "resource": BASE_URL,
+            "authorization_servers": [BASE_URL],
+        })
+
+    async def oauth_authorization_server(request: Request) -> JSONResponse:
+        return JSONResponse({
+            "issuer": BASE_URL,
+            "authorization_endpoint": f"{BASE_URL}/authorize",
+            "token_endpoint": f"{BASE_URL}/token",
+            "registration_endpoint": f"{BASE_URL}/register",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code"],
+            "token_endpoint_auth_methods_supported": ["none"],
+            "code_challenge_methods_supported": ["S256"],
+        })
+
+    async def register(request: Request) -> JSONResponse:
+        body = await request.json()
+        print(f"REGISTER REQUEST: {body}", flush=True)
+        return JSONResponse({
+            "client_id": "anonymous",
+            "client_id_issued_at": 1700000000,
+            "client_secret": "unused",
+            "client_secret_expires_at": 0,
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "redirect_uris": body.get("redirect_uris", []),
+            "client_name": body.get("client_name", "Claude"),
+        })
+
+    async def authorize(request: Request) -> RedirectResponse:
+        redirect_uri = request.query_params.get("redirect_uri", "")
+        state = request.query_params.get("state", "")
+        print(f"AUTHORIZE REQUEST: {dict(request.query_params)}", flush=True)
+        return RedirectResponse(
+            url=f"{redirect_uri}?code=homelab-auth-code&state={state}",
+            status_code=302
+        )
+
+    async def token(request: Request) -> JSONResponse:
+        form = await request.form()
+        print(f"TOKEN REQUEST: {dict(form)}", flush=True)
+        return JSONResponse({
+            "access_token": "homelab-anonymous-token",
+            "token_type": "bearer",
+            "expires_in": 86400,
+        })
+
+    wellknown_routes = [
+        Route("/.well-known/oauth-protected-resource/mcp", oauth_protected_resource),
+        Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
+        Route("/.well-known/oauth-authorization-server", oauth_authorization_server),
+        Route("/register", register, methods=["POST"]),
+        Route("/authorize", authorize, methods=["GET"]),
+        Route("/token", token, methods=["POST"]),
+    ]
+    from contextlib import asynccontextmanager
+
+    mcp_app = mcp.streamable_http_app()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        async with mcp_app.router.lifespan_context(app):
+            yield
+
+    app = Starlette(
+        routes=wellknown_routes + [Mount("/", app=mcp_app)],
+        lifespan=lifespan
+    )
+    app.add_middleware(StripAuthMiddleware)
+
+    print(f"Starting Homelab MCP server on {HOST}:{PORT} (Streamable HTTP transport)", flush=True)
+    uvicorn.run(app, host=HOST, port=PORT)

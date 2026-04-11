@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ':*)",
+      "Bash(python -m venv .venv)",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(ssh-keygen -l -f ~/.ssh/id_rsa.pub)",
+      "Bash(ssh-keygen -l -f ~/.ssh/id_ed25519.pub)",
+      "Read(//c/Users/skip/.ssh/**)",
+      "Bash(gh --version)",
+      "Bash(gh repo:*)"
+    ]
+  }
+}
