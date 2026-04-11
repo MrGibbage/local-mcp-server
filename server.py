@@ -115,7 +115,6 @@ def _run(host: str | None, command: str) -> dict[str, Any]:
     host_name, host_cfg = _resolve_host(host)
     result = _ssh_exec(host_cfg, command)
     result["host"] = host_name
-    result["command"] = command
     return result
 
 
@@ -147,17 +146,29 @@ def list_hosts() -> dict:
 
 
 @mcp.tool()
-def ssh_exec(command: str, host: Optional[str] = None) -> dict:
+def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200) -> dict:
     """
     Run an arbitrary shell command on a named host via SSH.
 
     Returns stdout, stderr, exit_code, host, and command.
     If ssh_command_allowlist is set in config.yaml, only listed base commands
     are permitted.
+
+    Args:
+        command: Shell command to run.
+        host: Named host from config (defaults to default_host).
+        max_lines: Truncate stdout to this many lines (default 200). Use 0 for unlimited.
     """
     try:
         _check_allowlist(command)
-        return _run(host, command)
+        result = _run(host, command)
+        result["command"] = command
+        if max_lines and result["stdout"]:
+            lines = result["stdout"].splitlines()
+            if len(lines) > max_lines:
+                result["stdout"] = "\n".join(lines[-max_lines:])
+                result["truncated"] = True
+        return result
     except ValueError as exc:
         return {"stdout": "", "stderr": str(exc), "exit_code": -1, "host": host, "command": command}
 
@@ -200,10 +211,11 @@ def docker_logs(container: str, host: Optional[str] = None, tail: int = 100) -> 
     Args:
         container: Container name or ID.
         host: Named host from config (defaults to default_host).
-        tail: Number of log lines to return (default 100).
+        tail: Number of log lines to return (default 100, max 500).
     """
     try:
-        return _run(host, f"docker logs --tail {int(tail)} {container} 2>&1")
+        capped_tail = min(int(tail), 500)
+        return _run(host, f"docker logs --tail {capped_tail} {container} 2>&1")
     except ValueError as exc:
         return {"stdout": "", "stderr": str(exc), "exit_code": -1}
 
@@ -212,27 +224,36 @@ def docker_logs(container: str, host: Optional[str] = None, tail: int = 100) -> 
 def docker_restart(container: str, host: Optional[str] = None) -> dict:
     """Restart a Docker container by name or ID."""
     try:
-        return _run(host, f"docker restart {container}")
+        result = _run(host, f"docker restart {container}")
+        ok = result["exit_code"] == 0
+        return {"ok": ok, "container": container, "host": result["host"],
+                **({"error": result["stderr"]} if not ok else {})}
     except ValueError as exc:
-        return {"stdout": "", "stderr": str(exc), "exit_code": -1}
+        return {"ok": False, "container": container, "error": str(exc)}
 
 
 @mcp.tool()
 def docker_stop(container: str, host: Optional[str] = None) -> dict:
     """Stop a running Docker container."""
     try:
-        return _run(host, f"docker stop {container}")
+        result = _run(host, f"docker stop {container}")
+        ok = result["exit_code"] == 0
+        return {"ok": ok, "container": container, "host": result["host"],
+                **({"error": result["stderr"]} if not ok else {})}
     except ValueError as exc:
-        return {"stdout": "", "stderr": str(exc), "exit_code": -1}
+        return {"ok": False, "container": container, "error": str(exc)}
 
 
 @mcp.tool()
 def docker_start(container: str, host: Optional[str] = None) -> dict:
     """Start a stopped Docker container."""
     try:
-        return _run(host, f"docker start {container}")
+        result = _run(host, f"docker start {container}")
+        ok = result["exit_code"] == 0
+        return {"ok": ok, "container": container, "host": result["host"],
+                **({"error": result["stderr"]} if not ok else {})}
     except ValueError as exc:
-        return {"stdout": "", "stderr": str(exc), "exit_code": -1}
+        return {"ok": False, "container": container, "error": str(exc)}
 
 
 @mcp.tool()
@@ -245,9 +266,21 @@ def docker_pull(image: str, host: Optional[str] = None) -> dict:
         host: Named host from config (defaults to default_host).
     """
     try:
-        return _run(host, f"docker pull {image}")
+        result = _run(host, f"docker pull {image}")
+        ok = result["exit_code"] == 0
+        # Extract just the final status line — skip the noisy per-layer progress lines
+        status = ""
+        if result["stdout"]:
+            for line in reversed(result["stdout"].splitlines()):
+                line = line.strip()
+                if line:
+                    status = line
+                    break
+        return {"ok": ok, "image": image, "host": result["host"],
+                "status": status,
+                **({"error": result["stderr"]} if not ok else {})}
     except ValueError as exc:
-        return {"stdout": "", "stderr": str(exc), "exit_code": -1}
+        return {"ok": False, "image": image, "error": str(exc)}
 
 
 @mcp.tool()
@@ -260,9 +293,14 @@ def docker_compose_up(path: str, host: Optional[str] = None) -> dict:
         host: Named host from config (defaults to default_host).
     """
     try:
-        return _run(host, f"docker compose -f {path}/docker-compose.yml up -d 2>&1")
+        result = _run(host, f"docker compose -f {path}/docker-compose.yml up -d 2>&1")
+        ok = result["exit_code"] == 0
+        lines = result["stdout"].splitlines()
+        return {"ok": ok, "host": result["host"], "path": path,
+                "stdout": "\n".join(lines[-50:]) if lines else "",
+                **({"error": result["stderr"]} if not ok else {})}
     except ValueError as exc:
-        return {"stdout": "", "stderr": str(exc), "exit_code": -1}
+        return {"ok": False, "path": path, "error": str(exc)}
 
 
 @mcp.tool()
@@ -275,9 +313,14 @@ def docker_compose_down(path: str, host: Optional[str] = None) -> dict:
         host: Named host from config (defaults to default_host).
     """
     try:
-        return _run(host, f"docker compose -f {path}/docker-compose.yml down 2>&1")
+        result = _run(host, f"docker compose -f {path}/docker-compose.yml down 2>&1")
+        ok = result["exit_code"] == 0
+        lines = result["stdout"].splitlines()
+        return {"ok": ok, "host": result["host"], "path": path,
+                "stdout": "\n".join(lines[-50:]) if lines else "",
+                **({"error": result["stderr"]} if not ok else {})}
     except ValueError as exc:
-        return {"stdout": "", "stderr": str(exc), "exit_code": -1}
+        return {"ok": False, "path": path, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -298,9 +341,12 @@ def systemctl_status(service: str, host: Optional[str] = None) -> dict:
 def systemctl_restart(service: str, host: Optional[str] = None) -> dict:
     """Restart a systemd service on the named host."""
     try:
-        return _run(host, f"systemctl restart {service}")
+        result = _run(host, f"systemctl restart {service}")
+        ok = result["exit_code"] == 0
+        return {"ok": ok, "service": service, "host": result["host"],
+                **({"error": result["stderr"]} if not ok else {})}
     except ValueError as exc:
-        return {"stdout": "", "stderr": str(exc), "exit_code": -1}
+        return {"ok": False, "service": service, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -309,11 +355,16 @@ def systemctl_restart(service: str, host: Optional[str] = None) -> dict:
 
 
 @mcp.tool()
-def read_file(path: str, host: Optional[str] = None) -> dict:
+def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200) -> dict:
     """
     Read the contents of a file on a remote host over SSH (SFTP).
 
     Returns the file content as a string, or an error message.
+
+    Args:
+        path: Absolute path to the file on the remote host.
+        host: Named host from config (defaults to default_host).
+        max_bytes: Maximum bytes to read (default 50 KB). Use 0 for unlimited.
     """
     try:
         host_name, host_cfg = _resolve_host(host)
@@ -338,9 +389,13 @@ def read_file(path: str, host: Optional[str] = None) -> dict:
         client.connect(**connect_kwargs)
         sftp = client.open_sftp()
         with sftp.file(path, "r") as f:
-            content = f.read().decode("utf-8", errors="replace")
+            raw = f.read(max_bytes if max_bytes else -1)
         sftp.close()
-        return {"content": content, "error": None, "host": host_name, "path": path}
+        content = raw.decode("utf-8", errors="replace")
+        result: dict[str, Any] = {"content": content, "host": host_name, "path": path}
+        if max_bytes and len(raw) == max_bytes:
+            result["truncated"] = True
+        return result
     except Exception as exc:  # noqa: BLE001
         return {"content": None, "error": str(exc), "host": host_name, "path": path}
     finally:
@@ -380,7 +435,7 @@ def write_file(path: str, content: str, host: Optional[str] = None) -> dict:
         with sftp.file(path, "w") as f:
             f.write(content.encode("utf-8"))
         sftp.close()
-        return {"success": True, "error": None, "host": host_name, "path": path}
+        return {"success": True, "host": host_name, "path": path}
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": str(exc), "host": host_name, "path": path}
     finally:
