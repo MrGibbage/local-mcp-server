@@ -174,10 +174,11 @@ def docker_ps(host: Optional[str] = None) -> dict:
 
     Returns a list of containers with name, image, status, and ports.
     """
+    fmt = '{"Name":"{{.Names}}","Image":"{{.Image}}","Status":"{{.Status}}","Ports":"{{.Ports}}"}'
     try:
-        result = _run(host, "docker ps --format '{{json .}}'")
+        result = _run(host, f"docker ps --format '{fmt}'")
         if result["exit_code"] != 0:
-            return result
+            return {"error": result["stderr"], "exit_code": result["exit_code"]}
         containers = []
         for line in result["stdout"].splitlines():
             line = line.strip()
@@ -186,11 +187,9 @@ def docker_ps(host: Optional[str] = None) -> dict:
                     containers.append(json.loads(line))
                 except json.JSONDecodeError:
                     containers.append({"raw": line})
-        result["containers"] = containers
-        result["count"] = len(containers)
-        return result
+        return {"containers": containers, "count": len(containers), "exit_code": 0}
     except ValueError as exc:
-        return {"stdout": "", "stderr": str(exc), "exit_code": -1}
+        return {"error": str(exc), "exit_code": -1}
 
 
 @mcp.tool()
