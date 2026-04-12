@@ -8,7 +8,8 @@
       "Bash(ssh-keygen -l -f ~/.ssh/id_ed25519.pub)",
       "Read(//c/Users/skip/.ssh/**)",
       "Bash(gh --version)",
-      "Bash(gh repo:*)"
+      "Bash(gh repo:*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('server.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")"
     ]
   }
 }
