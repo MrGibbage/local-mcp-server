@@ -577,25 +577,34 @@ def bookstack_read_page(page_id: int) -> dict:
 
 
 @mcp.tool()
-def bookstack_update_page(page_id: int, markdown: str) -> dict:
+def bookstack_update_page(page_id: int, markdown: Optional[str] = None, name: Optional[str] = None) -> dict:
     """
-    Update an existing BookStack page with new Markdown content.
+    Update an existing BookStack page. Can update content, title, or both.
 
-    Sends the content as the markdown field, which sets the page to Markdown editor mode.
-    This will also convert an HTML page to Markdown if one is updated this way.
+    At least one of markdown or name must be provided.
+    Sending markdown sets the page to Markdown editor mode and will convert
+    an HTML page to Markdown in the process.
 
     Returns ok, id, name, and url on success.
 
     Args:
         page_id: Numeric BookStack page ID.
         markdown: Full Markdown content to replace the page body with.
+        name: New page title.
     """
+    if markdown is None and name is None:
+        return {"ok": False, "error": "At least one of markdown or name must be provided."}
     try:
         base_url, headers = _bs_cfg()
+        payload: dict[str, Any] = {}
+        if markdown is not None:
+            payload["markdown"] = markdown
+        if name is not None:
+            payload["name"] = name
         resp = _requests.put(
             f"{base_url}/api/pages/{page_id}",
             headers=headers,
-            json={"markdown": markdown},
+            json=payload,
             timeout=15,
         )
         resp.raise_for_status()
@@ -777,6 +786,266 @@ def bookstack_get_page_history(page_id: int, limit: int = 5) -> dict:
             for r in data.get("data", [])
         ]
         return {"page_id": page_id, "revisions": revisions}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_delete_page(page_id: int, confirm: bool = False) -> dict:
+    """
+    Delete a BookStack page.
+
+    Call without confirm=True first — returns the page name for review.
+    Re-call with confirm=True to permanently delete.
+
+    Args:
+        page_id: Numeric BookStack page ID.
+        confirm: Must be True to actually delete.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        resp = _requests.get(f"{base_url}/api/pages/{page_id}", headers=headers, timeout=15)
+        resp.raise_for_status()
+        page = resp.json()
+        name = page.get("name", f"page {page_id}")
+        if not confirm:
+            return {
+                "ok": False,
+                "error": "Confirmation required",
+                "warning": f"This will permanently delete page '{name}'. Re-call with confirm=true to proceed.",
+            }
+        del_resp = _requests.delete(f"{base_url}/api/pages/{page_id}", headers=headers, timeout=15)
+        del_resp.raise_for_status()
+        return {"ok": True, "deleted": {"id": page_id, "name": name}}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_create_chapter(book_id: int, name: str, description: Optional[str] = None) -> dict:
+    """
+    Create a new chapter inside a book.
+
+    Returns ok, id, name, and book_id on success.
+
+    Args:
+        book_id: ID of the book to create the chapter in.
+        name: Chapter title.
+        description: Optional short description.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        payload: dict[str, Any] = {"book_id": book_id, "name": name}
+        if description is not None:
+            payload["description"] = description
+        resp = _requests.post(f"{base_url}/api/chapters", headers=headers, json=payload, timeout=15)
+        resp.raise_for_status()
+        chapter = resp.json()
+        return {
+            "ok": True,
+            "id": chapter.get("id"),
+            "name": chapter.get("name"),
+            "book_id": chapter.get("book_id"),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_update_chapter(chapter_id: int, name: Optional[str] = None, description: Optional[str] = None) -> dict:
+    """
+    Update a chapter's title and/or description.
+
+    At least one of name or description must be provided.
+
+    Returns ok, id, name on success.
+
+    Args:
+        chapter_id: Numeric BookStack chapter ID.
+        name: New chapter title.
+        description: New chapter description.
+    """
+    if name is None and description is None:
+        return {"ok": False, "error": "At least one of name or description must be provided."}
+    try:
+        base_url, headers = _bs_cfg()
+        payload: dict[str, Any] = {}
+        if name is not None:
+            payload["name"] = name
+        if description is not None:
+            payload["description"] = description
+        resp = _requests.put(
+            f"{base_url}/api/chapters/{chapter_id}",
+            headers=headers,
+            json=payload,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        chapter = resp.json()
+        return {"ok": True, "id": chapter.get("id"), "name": chapter.get("name")}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_delete_chapter(chapter_id: int, confirm: bool = False) -> dict:
+    """
+    Delete a BookStack chapter and all pages inside it.
+
+    Call without confirm=True first — returns chapter name and page count for review.
+    Re-call with confirm=True to permanently delete.
+
+    Args:
+        chapter_id: Numeric BookStack chapter ID.
+        confirm: Must be True to actually delete.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        resp = _requests.get(f"{base_url}/api/chapters/{chapter_id}", headers=headers, timeout=15)
+        resp.raise_for_status()
+        chapter = resp.json()
+        name = chapter.get("name", f"chapter {chapter_id}")
+        page_count = len(chapter.get("pages", []))
+        if not confirm:
+            return {
+                "ok": False,
+                "error": "Confirmation required",
+                "warning": (
+                    f"This will permanently delete chapter '{name}' and its {page_count} page(s). "
+                    "Re-call with confirm=true to proceed."
+                ),
+            }
+        del_resp = _requests.delete(f"{base_url}/api/chapters/{chapter_id}", headers=headers, timeout=15)
+        del_resp.raise_for_status()
+        return {"ok": True, "deleted": {"id": chapter_id, "name": name, "pages_deleted": page_count}}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_create_book(name: str, description: Optional[str] = None) -> dict:
+    """
+    Create a new book in BookStack.
+
+    Returns ok, id, name, and url on success.
+
+    Args:
+        name: Book title.
+        description: Optional short description.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        payload: dict[str, Any] = {"name": name}
+        if description is not None:
+            payload["description"] = description
+        resp = _requests.post(f"{base_url}/api/books", headers=headers, json=payload, timeout=15)
+        resp.raise_for_status()
+        book = resp.json()
+        return {
+            "ok": True,
+            "id": book.get("id"),
+            "name": book.get("name"),
+            "url": book.get("url"),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_update_book(book_id: int, name: Optional[str] = None, description: Optional[str] = None) -> dict:
+    """
+    Update a book's title and/or description.
+
+    At least one of name or description must be provided.
+
+    Returns ok, id, name, url on success.
+
+    Args:
+        book_id: Numeric BookStack book ID.
+        name: New book title.
+        description: New book description.
+    """
+    if name is None and description is None:
+        return {"ok": False, "error": "At least one of name or description must be provided."}
+    try:
+        base_url, headers = _bs_cfg()
+        payload: dict[str, Any] = {}
+        if name is not None:
+            payload["name"] = name
+        if description is not None:
+            payload["description"] = description
+        resp = _requests.put(f"{base_url}/api/books/{book_id}", headers=headers, json=payload, timeout=15)
+        resp.raise_for_status()
+        book = resp.json()
+        return {
+            "ok": True,
+            "id": book.get("id"),
+            "name": book.get("name"),
+            "url": book.get("url"),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_delete_book(book_id: int, confirm: bool = False) -> dict:
+    """
+    Delete a BookStack book and everything inside it (all chapters and pages).
+
+    Call without confirm=True first — returns book name with chapter and page counts for review.
+    Re-call with confirm=True to permanently delete.
+
+    Args:
+        book_id: Numeric BookStack book ID.
+        confirm: Must be True to actually delete.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        resp = _requests.get(f"{base_url}/api/books/{book_id}", headers=headers, timeout=15)
+        resp.raise_for_status()
+        book = resp.json()
+        name = book.get("name", f"book {book_id}")
+        contents = book.get("contents", [])
+        chapter_count = sum(1 for i in contents if i.get("type") == "chapter")
+        page_count = sum(
+            len(i.get("pages", [])) if i.get("type") == "chapter" else 1
+            for i in contents
+        )
+        if not confirm:
+            return {
+                "ok": False,
+                "error": "Confirmation required",
+                "warning": (
+                    f"This will permanently delete book '{name}' including "
+                    f"{chapter_count} chapter(s) and {page_count} page(s). "
+                    "Re-call with confirm=true to proceed."
+                ),
+            }
+        del_resp = _requests.delete(f"{base_url}/api/books/{book_id}", headers=headers, timeout=15)
+        del_resp.raise_for_status()
+        return {
+            "ok": True,
+            "deleted": {
+                "id": book_id,
+                "name": name,
+                "chapters_deleted": chapter_count,
+                "pages_deleted": page_count,
+            },
+        }
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except _requests.RequestException as exc:
