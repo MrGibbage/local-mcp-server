@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -1053,6 +1052,54 @@ def bookstack_delete_book(book_id: int, confirm: bool = False) -> dict:
 
 
 @mcp.tool()
+def bookstack_get_page_metadata(page_id: int) -> dict:
+    """
+    Return metadata for a BookStack page without fetching its content.
+
+    Use this to check page size, editor type, location, and timestamps before
+    deciding whether to read the full page. Useful for keeping context usage low —
+    if size_kb is over 10, consider whether the full content is needed.
+
+    Returns id, name, url, editor_type, size_bytes, size_kb, book_id, chapter_id,
+    created_at, updated_at, and revision_count.
+
+    Args:
+        page_id: Numeric BookStack page ID.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        resp = _requests.get(f"{base_url}/api/pages/{page_id}", headers=headers, timeout=15)
+        resp.raise_for_status()
+        page = resp.json()
+        md = page.get("markdown") or ""
+        html = page.get("html") or ""
+        if md:
+            editor_type = "markdown"
+            content = md
+        else:
+            editor_type = "html"
+            content = html
+        size_bytes = len(content.encode("utf-8"))
+        return {
+            "id": page.get("id"),
+            "name": page.get("name"),
+            "url": page.get("url"),
+            "editor_type": editor_type,
+            "size_bytes": size_bytes,
+            "size_kb": round(size_bytes / 1024, 1),
+            "book_id": page.get("book_id"),
+            "chapter_id": page.get("chapter_id"),
+            "created_at": page.get("created_at"),
+            "updated_at": page.get("updated_at"),
+            "revision_count": page.get("revision_count"),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 def bookstack_move_page(page_id: int, entity_type: str, entity_id: int) -> dict:
     """
     Move a page to a different book or chapter.
@@ -1142,13 +1189,13 @@ if __name__ == "__main__":
             ]
             return await call_next(request)
 
-    async def oauth_protected_resource(request: Request) -> JSONResponse:
+    async def oauth_protected_resource(_request: Request) -> JSONResponse:
         return JSONResponse({
             "resource": BASE_URL,
             "authorization_servers": [BASE_URL],
         })
 
-    async def oauth_authorization_server(request: Request) -> JSONResponse:
+    async def oauth_authorization_server(_request: Request) -> JSONResponse:
         return JSONResponse({
             "issuer": BASE_URL,
             "authorization_endpoint": f"{BASE_URL}/authorize",
