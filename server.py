@@ -1052,6 +1052,72 @@ def bookstack_delete_book(book_id: int, confirm: bool = False) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+@mcp.tool()
+def bookstack_move_page(page_id: int, entity_type: str, entity_id: int) -> dict:
+    """
+    Move a page to a different book or chapter.
+
+    Args:
+        page_id: Numeric ID of the page to move.
+        entity_type: Destination type — "book" to place the page at the book's
+                     top level, or "chapter" to nest it inside a chapter.
+        entity_id: ID of the destination book or chapter.
+    """
+    if entity_type not in ("book", "chapter"):
+        return {"ok": False, "error": "entity_type must be 'book' or 'chapter'."}
+    try:
+        base_url, headers = _bs_cfg()
+        resp = _requests.put(
+            f"{base_url}/api/pages/{page_id}/move",
+            headers=headers,
+            json={"entity_type": entity_type, "entity_id": entity_id},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        page = resp.json()
+        return {
+            "ok": True,
+            "id": page.get("id"),
+            "name": page.get("name"),
+            "url": page.get("url"),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_move_chapter(chapter_id: int, book_id: int) -> dict:
+    """
+    Move a chapter to a different book.
+
+    Args:
+        chapter_id: Numeric ID of the chapter to move.
+        book_id: ID of the destination book.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        resp = _requests.put(
+            f"{base_url}/api/chapters/{chapter_id}/move",
+            headers=headers,
+            json={"entity_type": "book", "entity_id": book_id},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        chapter = resp.json()
+        return {
+            "ok": True,
+            "id": chapter.get("id"),
+            "name": chapter.get("name"),
+            "book_id": chapter.get("book_id"),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
