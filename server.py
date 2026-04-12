@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import paramiko
+import requests as _requests
 import yaml
 from mcp.server.fastmcp import FastMCP
 
@@ -463,6 +464,324 @@ def memory_usage(host: Optional[str] = None) -> dict:
         return _run(host, "free -h")
     except ValueError as exc:
         return {"stdout": "", "stderr": str(exc), "exit_code": -1}
+
+# ---------------------------------------------------------------------------
+# Tools — BookStack (uses REST API)
+# ---------------------------------------------------------------------------
+
+
+def _bs_cfg() -> tuple[str, dict]:
+    """Return (base_url, headers) for BookStack API calls."""
+    cfg = CONFIG.get("bookstack", {})
+    base_url = cfg.get("url", "").rstrip("/")
+    token_id = cfg.get("token_id", "")
+    token_secret = cfg.get("token_secret", "")
+    if not (base_url and token_id and token_secret):
+        raise ValueError(
+            "bookstack config missing — set bookstack.url, token_id, token_secret in config.yaml"
+        )
+    headers = {
+        "Authorization": f"Token {token_id}:{token_secret}",
+        "Content-Type": "application/json",
+    }
+    return base_url, headers
+
+
+@mcp.tool()
+def bookstack_search(query: str, count: int = 10) -> dict:
+    """
+    Search BookStack pages, chapters, and books.
+
+    Returns a list of matching items with id, name, type, url, and a short preview.
+
+    Args:
+        query: Search string (supports BookStack filter syntax).
+        count: Max results to return (default 10, capped at 30).
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        capped = min(int(count), 30)
+        resp = _requests.get(
+            f"{base_url}/api/search",
+            headers=headers,
+            params={"query": query, "count": capped},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results = []
+        for item in data.get("data", []):
+            results.append({
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "type": item.get("type"),
+                "url": item.get("url"),
+                "preview": (item.get("preview_html", {}).get("content", "") or "")[:300],
+            })
+        return {"results": results, "total": data.get("total", len(results))}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_read_page(page_id: int) -> dict:
+    """
+    Read a BookStack page by ID.
+
+    Returns id, name, content, editor_type ("markdown" or "html"), and updated_at.
+    editor_type will be "html" for older pages not yet converted — those need to be
+    opened in the BookStack UI and re-saved as Markdown to convert them.
+    Content is capped at 50 KB; truncated flag is set if cut.
+
+    Args:
+        page_id: Numeric BookStack page ID.
+    """
+    MAX_BYTES = 51200
+    try:
+        base_url, headers = _bs_cfg()
+        resp = _requests.get(
+            f"{base_url}/api/pages/{page_id}",
+            headers=headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        page = resp.json()
+        md = page.get("markdown") or ""
+        html = page.get("html") or ""
+        if md:
+            editor_type = "markdown"
+            raw_content = md
+        else:
+            editor_type = "html"
+            raw_content = html
+        truncated = False
+        if len(raw_content.encode("utf-8")) > MAX_BYTES:
+            raw_content = raw_content.encode("utf-8")[:MAX_BYTES].decode("utf-8", errors="ignore")
+            truncated = True
+        result: dict[str, Any] = {
+            "id": page.get("id"),
+            "name": page.get("name"),
+            "editor_type": editor_type,
+            "content": raw_content,
+            "updated_at": page.get("updated_at"),
+        }
+        if truncated:
+            result["truncated"] = True
+        return result
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_update_page(page_id: int, markdown: str) -> dict:
+    """
+    Update an existing BookStack page with new Markdown content.
+
+    Sends the content as the markdown field, which sets the page to Markdown editor mode.
+    This will also convert an HTML page to Markdown if one is updated this way.
+
+    Returns ok, id, name, and url on success.
+
+    Args:
+        page_id: Numeric BookStack page ID.
+        markdown: Full Markdown content to replace the page body with.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        resp = _requests.put(
+            f"{base_url}/api/pages/{page_id}",
+            headers=headers,
+            json={"markdown": markdown},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        page = resp.json()
+        return {
+            "ok": True,
+            "id": page.get("id"),
+            "name": page.get("name"),
+            "url": page.get("url"),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_create_page(
+    book_id: int,
+    name: str,
+    markdown: str,
+    chapter_id: Optional[int] = None,
+) -> dict:
+    """
+    Create a new BookStack page with Markdown content.
+
+    If chapter_id is provided the page is created inside that chapter;
+    otherwise it is created at the book's top level.
+
+    Returns ok, id, name, and url on success.
+
+    Args:
+        book_id: ID of the book to create the page in.
+        name: Page title.
+        markdown: Markdown content for the page body.
+        chapter_id: Optional chapter ID to nest the page under.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        payload: dict[str, Any] = {
+            "book_id": book_id,
+            "name": name,
+            "markdown": markdown,
+        }
+        if chapter_id is not None:
+            payload["chapter_id"] = chapter_id
+        resp = _requests.post(
+            f"{base_url}/api/pages",
+            headers=headers,
+            json=payload,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        page = resp.json()
+        return {
+            "ok": True,
+            "id": page.get("id"),
+            "name": page.get("name"),
+            "url": page.get("url"),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_list_books() -> dict:
+    """
+    List all books in BookStack.
+
+    Returns a list of {id, name, description} — useful for navigation and
+    for finding book_id values needed by bookstack_create_page.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        resp = _requests.get(
+            f"{base_url}/api/books",
+            headers=headers,
+            params={"count": 100},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        books = [
+            {
+                "id": b.get("id"),
+                "name": b.get("name"),
+                "description": (b.get("description") or "").strip(),
+            }
+            for b in data.get("data", [])
+        ]
+        return {"books": books, "total": len(books)}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_get_book_contents(book_id: int) -> dict:
+    """
+    Return the chapter and page tree for a specific book.
+
+    Chapters include their nested pages. Top-level pages (not in any chapter)
+    are listed separately under "pages".
+
+    Useful for finding chapter_id values before creating a page, or for
+    understanding the structure of a book before updating.
+
+    Args:
+        book_id: Numeric BookStack book ID.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        resp = _requests.get(
+            f"{base_url}/api/books/{book_id}",
+            headers=headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        book = resp.json()
+        chapters = []
+        top_pages = []
+        for item in book.get("contents", []):
+            if item.get("type") == "chapter":
+                chapters.append({
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                    "pages": [
+                        {"id": p.get("id"), "name": p.get("name")}
+                        for p in item.get("pages", [])
+                    ],
+                })
+            elif item.get("type") == "page":
+                top_pages.append({"id": item.get("id"), "name": item.get("name")})
+        return {
+            "id": book.get("id"),
+            "name": book.get("name"),
+            "chapters": chapters,
+            "pages": top_pages,
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_get_page_history(page_id: int, limit: int = 5) -> dict:
+    """
+    List recent revisions for a BookStack page.
+
+    Returns revision entries with id, name, editor (user display name),
+    and created_at timestamp — newest first.
+
+    Args:
+        page_id: Numeric BookStack page ID.
+        limit: Number of revisions to return (default 5, capped at 20).
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        capped = min(int(limit), 20)
+        resp = _requests.get(
+            f"{base_url}/api/pages/{page_id}/history",
+            headers=headers,
+            params={"count": capped},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        revisions = [
+            {
+                "id": r.get("id"),
+                "name": r.get("name"),
+                "editor": (r.get("createdBy") or {}).get("name") or r.get("created_by"),
+                "created_at": r.get("created_at"),
+            }
+            for r in data.get("data", [])
+        ]
+        return {"page_id": page_id, "revisions": revisions}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
 
 # ---------------------------------------------------------------------------
 # Entry point

@@ -36,6 +36,13 @@ hosts:
     user: myuser
     key_path: /keys/id_rsa
 
+# BookStack documentation wiki integration.
+# Used by the bookstack_* tools to read and update wiki pages via the REST API.
+bookstack:
+  url: "https://bookstack.example.com"   # base URL, no trailing slash
+  token_id: "your-token-id"              # API token ID from BookStack profile
+  token_secret: "your-token-secret"      # API token secret
+
 # Optional: restrict which base commands ssh_exec is allowed to run.
 # Comment out this block (or set to null) to allow all commands.
 # The check matches the first word of the command against this list.
