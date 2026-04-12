@@ -286,6 +286,69 @@ def docker_pull(image: str, host: Optional[str] = None) -> dict:
 
 
 @mcp.tool()
+def docker_inspect(container: str, format: Optional[str] = None, host: Optional[str] = None) -> dict:
+    """
+    Inspect a Docker container's configuration and runtime state.
+
+    Returns the full JSON inspection data, or a specific field when format is
+    provided. Use this to check security options, resource limits, mounts,
+    environment variables, and network settings.
+
+    Args:
+        container: Container name or ID.
+        format: Optional Go template format string, e.g.
+                '{{.HostConfig.SecurityOpt}}' or '{{.State.Status}}'.
+        host: Named host from config (defaults to default_host).
+    """
+    try:
+        fmt_flag = f" --format '{format}'" if format else ""
+        result = _run(host, f"docker inspect{fmt_flag} {container}")
+        ok = result["exit_code"] == 0
+        if not ok:
+            return {"ok": False, "container": container, "host": result["host"],
+                    "error": result["stderr"]}
+        output = result["stdout"].strip()
+        if not format:
+            try:
+                data = json.loads(output)
+                return {"ok": True, "container": container, "host": result["host"],
+                        "data": data[0] if isinstance(data, list) and len(data) == 1 else data}
+            except json.JSONDecodeError:
+                pass
+        return {"ok": True, "container": container, "host": result["host"], "output": output}
+    except ValueError as exc:
+        return {"ok": False, "container": container, "error": str(exc)}
+
+
+@mcp.tool()
+def docker_stats(container: str, host: Optional[str] = None) -> dict:
+    """
+    Get a one-shot resource usage snapshot for a Docker container.
+
+    Returns CPU%, memory usage/limit, memory%, and network I/O.
+
+    Args:
+        container: Container name or ID.
+        host: Named host from config (defaults to default_host).
+    """
+    fmt = '{"Name":"{{.Name}}","CPU":"{{.CPUPerc}}","MemUsage":"{{.MemUsage}}","MemPerc":"{{.MemPerc}}","NetIO":"{{.NetIO}}","BlockIO":"{{.BlockIO}}"}'
+    try:
+        result = _run(host, f"docker stats --no-stream --format '{fmt}' {container}")
+        ok = result["exit_code"] == 0
+        if not ok:
+            return {"ok": False, "container": container, "host": result["host"],
+                    "error": result["stderr"]}
+        output = result["stdout"].strip()
+        try:
+            data = json.loads(output)
+            return {"ok": True, "container": container, "host": result["host"], "stats": data}
+        except json.JSONDecodeError:
+            return {"ok": True, "container": container, "host": result["host"], "raw": output}
+    except ValueError as exc:
+        return {"ok": False, "container": container, "error": str(exc)}
+
+
+@mcp.tool()
 def docker_compose_up(path: str, host: Optional[str] = None) -> dict:
     """
     Run 'docker compose up -d' in the given directory on a host.
@@ -394,7 +457,8 @@ def systemctl_list(host: Optional[str] = None, state: Optional[str] = None) -> d
 
 
 @mcp.tool()
-def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200) -> dict:
+def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200,
+              use_sudo: bool = False) -> dict:
     """
     Read the contents of a file on a remote host over SSH (SFTP).
 
@@ -404,11 +468,29 @@ def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200) -> 
         path: Absolute path to the file on the remote host.
         host: Named host from config (defaults to default_host).
         max_bytes: Maximum bytes to read (default 50 KB). Use 0 for unlimited.
+        use_sudo: If True, read via 'sudo cat' instead of SFTP. Use for root-owned
+                  files that the SSH user cannot access directly. Requires passwordless
+                  sudo on the target host.
     """
     try:
         host_name, host_cfg = _resolve_host(host)
     except ValueError as exc:
         return {"content": None, "error": str(exc), "host": host, "path": path}
+
+    if use_sudo:
+        try:
+            result = _run(host, f"sudo cat {path}")
+            if result["exit_code"] != 0:
+                return {"content": None, "error": result["stderr"],
+                        "host": host_name, "path": path}
+            content = result["stdout"]
+            out: dict[str, Any] = {"content": content, "host": host_name, "path": path}
+            if max_bytes and len(content.encode()) > max_bytes:
+                out["content"] = content.encode()[:max_bytes].decode("utf-8", errors="replace")
+                out["truncated"] = True
+            return out
+        except ValueError as exc:
+            return {"content": None, "error": str(exc), "host": host_name, "path": path}
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -442,22 +524,59 @@ def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200) -> 
 
 
 @mcp.tool()
-def write_file(path: str, content: str, host: Optional[str] = None) -> dict:
+def write_file(path: str, content: str, host: Optional[str] = None,
+               use_sudo: bool = False) -> dict:
     """
     Write (overwrite) a file on a remote host over SSH (SFTP).
 
     WARNING: This replaces the file entirely. Make sure to read it first if you
     only intend to make partial changes.
+
+    Args:
+        path: Absolute path to the file on the remote host.
+        content: File content to write (UTF-8).
+        host: Named host from config (defaults to default_host).
+        use_sudo: If True, write via 'sudo tee' instead of SFTP. Use for root-owned
+                  files that the SSH user cannot write directly. Requires passwordless
+                  sudo on the target host.
     """
     try:
         host_name, host_cfg = _resolve_host(host)
     except ValueError as exc:
         return {"success": False, "error": str(exc), "host": host, "path": path}
 
+    if use_sudo:
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            connect_kwargs: dict[str, Any] = {
+                "hostname": host_cfg["hostname"],
+                "username": host_cfg.get("user", "root"),
+                "timeout": 30,
+            }
+            key_path = host_cfg.get("key_path")
+            if key_path:
+                connect_kwargs["key_filename"] = str(key_path)
+            port = host_cfg.get("port", 22)
+            if port != 22:
+                connect_kwargs["port"] = int(port)
+            client.connect(**connect_kwargs)
+            stdin, stdout, stderr = client.exec_command(f"sudo tee {path} > /dev/null")
+            stdin.write(content.encode("utf-8"))
+            stdin.channel.shutdown_write()
+            exit_code = stdout.channel.recv_exit_status()
+            err = stderr.read().decode("utf-8", errors="replace").strip()
+            client.close()
+            if exit_code != 0:
+                return {"success": False, "error": err, "host": host_name, "path": path}
+            return {"success": True, "host": host_name, "path": path}
+        except Exception as exc:  # noqa: BLE001
+            return {"success": False, "error": str(exc), "host": host_name, "path": path}
+
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        connect_kwargs: dict[str, Any] = {
+        connect_kwargs = {
             "hostname": host_cfg["hostname"],
             "username": host_cfg.get("user", "root"),
             "timeout": 30,
@@ -696,6 +815,63 @@ def stat_file(path: str, host: Optional[str] = None) -> dict:
         return {"ok": False, "error": str(exc), "host": host_name, "path": path}
     finally:
         client.close()
+
+
+@mcp.tool()
+def list_directory(path: str, host: Optional[str] = None, all: bool = True) -> dict:
+    """
+    List the contents of a directory on a remote host with ownership and permission details.
+
+    Returns a structured list of entries with name, type, permissions, owner, group,
+    size, and modified time. Use this to check file ownership, find config files, or
+    verify directory contents before reading or writing.
+
+    Args:
+        path: Absolute path to the directory on the remote host.
+        host: Named host from config (defaults to default_host).
+        all: Include hidden files (dot-files). Default True.
+    """
+    try:
+        all_flag = "-la" if all else "-l"
+        result = _run(host, f"ls {all_flag} --time-style=long-iso {path} 2>&1")
+        ok = result["exit_code"] == 0
+        if not ok:
+            return {"ok": False, "path": path, "host": result["host"], "error": result["stdout"]}
+
+        entries = []
+        for line in result["stdout"].splitlines():
+            # Skip "total N" header line
+            if line.startswith("total "):
+                continue
+            parts = line.split(None, 8)
+            if len(parts) < 9:
+                continue
+            perms, _, owner, group, size, date, time_, *name_parts = parts
+            name = " ".join(name_parts)
+            # Resolve symlink display (name -> target)
+            if " -> " in name:
+                display_name, target = name.split(" -> ", 1)
+            else:
+                display_name, target = name, None
+
+            entry: dict[str, Any] = {
+                "name": display_name,
+                "permissions": perms,
+                "owner": owner,
+                "group": group,
+                "size_bytes": int(size) if size.isdigit() else size,
+                "modified": f"{date} {time_}",
+                "type": "directory" if perms.startswith("d") else
+                        "symlink" if perms.startswith("l") else "file",
+            }
+            if target:
+                entry["symlink_target"] = target
+            entries.append(entry)
+
+        return {"ok": True, "path": path, "host": result["host"],
+                "entries": entries, "count": len(entries)}
+    except ValueError as exc:
+        return {"ok": False, "path": path, "error": str(exc)}
 
 
 @mcp.tool()

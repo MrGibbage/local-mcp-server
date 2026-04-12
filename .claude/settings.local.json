@@ -10,7 +10,10 @@
       "Bash(gh --version)",
       "Bash(gh repo:*)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('server.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
-      "mcp__claude_ai_Local_MCP_Server__docker_logs"
+      "mcp__claude_ai_Local_MCP_Server__docker_logs",
+      "Bash(.venv/Scripts/python.exe -c \"import py_compile; py_compile.compile\\('server.py', doraise=True\\); print\\('OK'\\)\")",
+      "mcp__claude_ai_Local_MCP_Server__ssh_exec",
+      "Bash(ssh docker-server:*)"
     ]
   }
 }
