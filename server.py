@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import stat as _stat
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -349,6 +351,43 @@ def systemctl_restart(service: str, host: Optional[str] = None) -> dict:
         return {"ok": False, "service": service, "error": str(exc)}
 
 
+@mcp.tool()
+def systemctl_list(host: Optional[str] = None, state: Optional[str] = None) -> dict:
+    """
+    List systemd service units on a host, with optional state filter.
+
+    Useful for discovering what is running, failed, or inactive without
+    needing to know service names in advance.
+
+    Args:
+        host: Named host from config (defaults to default_host).
+        state: Filter by unit state — e.g. "failed", "active", "inactive",
+               "running". Omit to list all loaded service units.
+    """
+    try:
+        cmd = "systemctl list-units --type=service --no-pager --plain --no-legend"
+        if state:
+            cmd += f" --state={state}"
+        result = _run(host, cmd)
+        if result["exit_code"] != 0:
+            return {"ok": False, "error": result["stderr"], "host": result["host"]}
+        units = []
+        for line in result["stdout"].splitlines():
+            parts = line.split(None, 4)
+            if len(parts) < 4:
+                continue
+            units.append({
+                "unit": parts[0],
+                "load": parts[1],
+                "active": parts[2],
+                "sub": parts[3],
+                "description": parts[4] if len(parts) > 4 else "",
+            })
+        return {"units": units, "count": len(units), "host": result["host"]}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Tools — File I/O
 # ---------------------------------------------------------------------------
@@ -522,6 +561,231 @@ def patch_file(
             "path": path,
             "replacements": count if replace_all else 1,
         }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "host": host_name, "path": path}
+    finally:
+        client.close()
+
+
+@mcp.tool()
+def tail_file(path: str, lines: int = 50, host: Optional[str] = None) -> dict:
+    """
+    Return the last N lines of a file on a remote host.
+
+    More efficient than read_file for log files — avoids loading the entire
+    file into context when you only need recent entries.
+
+    Args:
+        path: Absolute path to the file on the remote host.
+        lines: Number of lines to return from the end (default 50, max 500).
+        host: Named host from config (defaults to default_host).
+    """
+    try:
+        capped = min(int(lines), 500)
+        result = _run(host, f"tail -n {capped} {path}")
+        if result["exit_code"] != 0:
+            return {"ok": False, "error": result["stderr"], "host": result["host"], "path": path}
+        return {
+            "content": result["stdout"],
+            "lines": len(result["stdout"].splitlines()),
+            "host": result["host"],
+            "path": path,
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "path": path}
+
+
+@mcp.tool()
+def grep_file(path: str, pattern: str, host: Optional[str] = None, context: int = 0) -> dict:
+    """
+    Search for a pattern in a remote file and return matching lines.
+
+    Returns only the matching lines (with optional context) rather than the
+    full file — keeps large file content out of the conversation.
+
+    Args:
+        path: Absolute path to the file on the remote host.
+        pattern: Search string or basic regex pattern.
+        host: Named host from config (defaults to default_host).
+        context: Number of lines to show before and after each match (default 0, max 5).
+    """
+    try:
+        ctx = min(int(context), 5)
+        ctx_flag = f" -C {ctx}" if ctx > 0 else ""
+        result = _run(host, f"grep -n{ctx_flag} {pattern!r} {path}")
+        if result["exit_code"] == 1:
+            # exit code 1 = no matches (not an error)
+            return {"matches": [], "match_count": 0, "host": result["host"], "path": path}
+        if result["exit_code"] != 0:
+            return {"ok": False, "error": result["stderr"], "host": result["host"], "path": path}
+        return {
+            "matches": result["stdout"].splitlines(),
+            "match_count": len([l for l in result["stdout"].splitlines() if ":" in l]),
+            "host": result["host"],
+            "path": path,
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "path": path}
+
+
+@mcp.tool()
+def stat_file(path: str, host: Optional[str] = None) -> dict:
+    """
+    Return metadata for a file or directory on a remote host without reading its content.
+
+    Returns exists, type (file/directory/symlink), size_bytes, size_kb, and
+    modified time. Use this to check whether a path exists or how large a file
+    is before deciding to read it.
+
+    Args:
+        path: Absolute path on the remote host.
+        host: Named host from config (defaults to default_host).
+    """
+    try:
+        host_name, host_cfg = _resolve_host(host)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "host": host, "path": path}
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        connect_kwargs: dict[str, Any] = {
+            "hostname": host_cfg["hostname"],
+            "username": host_cfg.get("user", "root"),
+            "timeout": 30,
+        }
+        key_path = host_cfg.get("key_path")
+        if key_path:
+            connect_kwargs["key_filename"] = str(key_path)
+        port = host_cfg.get("port", 22)
+        if port != 22:
+            connect_kwargs["port"] = int(port)
+
+        client.connect(**connect_kwargs)
+        sftp = client.open_sftp()
+        try:
+            attr = sftp.stat(path)
+        except FileNotFoundError:
+            return {"exists": False, "host": host_name, "path": path}
+        finally:
+            sftp.close()
+
+        mode = attr.st_mode or 0
+        if _stat.S_ISDIR(mode):
+            file_type = "directory"
+        elif _stat.S_ISLNK(mode):
+            file_type = "symlink"
+        else:
+            file_type = "file"
+
+        size_bytes = attr.st_size or 0
+        modified = (
+            datetime.fromtimestamp(attr.st_mtime, tz=timezone.utc).isoformat()
+            if attr.st_mtime else None
+        )
+        return {
+            "exists": True,
+            "type": file_type,
+            "size_bytes": size_bytes,
+            "size_kb": round(size_bytes / 1024, 1),
+            "modified": modified,
+            "host": host_name,
+            "path": path,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "host": host_name, "path": path}
+    finally:
+        client.close()
+
+
+@mcp.tool()
+def backup_file(path: str, host: Optional[str] = None) -> dict:
+    """
+    Create a timestamped backup of a file on a remote host before editing it.
+
+    Copies the file to <path>.backup.YYYYMMDD-HHMM in the same directory.
+    Run this before patch_file or write_file when editing important config files.
+
+    Args:
+        path: Absolute path to the file to back up.
+        host: Named host from config (defaults to default_host).
+    """
+    try:
+        result = _run(host, f"cp {path} {path}.backup.$(date +%Y%m%d-%H%M)")
+        ok = result["exit_code"] == 0
+        return {
+            "ok": ok,
+            "path": path,
+            "backup_path": f"{path}.backup.<YYYYMMDD-HHMM>",
+            "host": result["host"],
+            **({"error": result["stderr"]} if not ok else {}),
+        }
+    except ValueError as exc:
+        return {"ok": False, "path": path, "error": str(exc)}
+
+
+@mcp.tool()
+def validate_config(path: str, host: Optional[str] = None) -> dict:
+    """
+    Validate a YAML or JSON config file on a remote host without restarting any service.
+
+    Reads the file via SFTP and parses it locally — catches syntax errors before
+    they cause a failed service restart. File type is detected from the extension
+    (.yml/.yaml for YAML, .json for JSON).
+
+    Args:
+        path: Absolute path to the config file on the remote host.
+        host: Named host from config (defaults to default_host).
+    """
+    try:
+        host_name, host_cfg = _resolve_host(host)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "host": host, "path": path}
+
+    ext = Path(path).suffix.lower()
+    if ext in (".yml", ".yaml"):
+        file_type = "yaml"
+    elif ext == ".json":
+        file_type = "json"
+    else:
+        return {"ok": False, "error": f"Unsupported extension '{ext}'. Expected .yml, .yaml, or .json.", "path": path}
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        connect_kwargs: dict[str, Any] = {
+            "hostname": host_cfg["hostname"],
+            "username": host_cfg.get("user", "root"),
+            "timeout": 30,
+        }
+        key_path = host_cfg.get("key_path")
+        if key_path:
+            connect_kwargs["key_filename"] = str(key_path)
+        port = host_cfg.get("port", 22)
+        if port != 22:
+            connect_kwargs["port"] = int(port)
+
+        client.connect(**connect_kwargs)
+        sftp = client.open_sftp()
+        with sftp.file(path, "r") as f:
+            content = f.read().decode("utf-8", errors="replace")
+        sftp.close()
+
+        try:
+            if file_type == "yaml":
+                yaml.safe_load(content)
+            else:
+                json.loads(content)
+            return {"ok": True, "valid": True, "file_type": file_type, "host": host_name, "path": path}
+        except Exception as parse_exc:
+            return {
+                "ok": True,
+                "valid": False,
+                "file_type": file_type,
+                "error": str(parse_exc),
+                "host": host_name,
+                "path": path,
+            }
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "host": host_name, "path": path}
     finally:
