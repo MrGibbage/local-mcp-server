@@ -9,7 +9,8 @@
       "Read(//c/Users/skip/.ssh/**)",
       "Bash(gh --version)",
       "Bash(gh repo:*)",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('server.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('server.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "mcp__claude_ai_Local_MCP_Server__docker_logs"
     ]
   }
 }
