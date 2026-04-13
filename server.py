@@ -321,17 +321,41 @@ def docker_inspect(container: str, format: Optional[str] = None, host: Optional[
 
 
 @mcp.tool()
+def docker_exec(container: str, command: str, host: Optional[str] = None) -> dict:
+    """
+    Run a command inside a running Docker container.
+
+    Equivalent to 'docker exec <container> <command>'. Use for in-container
+    diagnostics such as checking /proc/1/status for capabilities, inspecting
+    running processes, or verifying installed packages.
+
+    Args:
+        container: Container name or ID.
+        command: Command to run inside the container (passed to sh -c).
+        host: Named host from config (defaults to default_host).
+    """
+    try:
+        result = _run(host, f"docker exec {container} sh -c {repr(command)}")
+        ok = result["exit_code"] == 0
+        return {"ok": ok, "container": container, "host": result["host"],
+                "output": result["stdout"],
+                **({"error": result["stderr"]} if not ok else {})}
+    except ValueError as exc:
+        return {"ok": False, "container": container, "error": str(exc)}
+
+
+@mcp.tool()
 def docker_stats(container: str, host: Optional[str] = None) -> dict:
     """
     Get a one-shot resource usage snapshot for a Docker container.
 
-    Returns CPU%, memory usage/limit, memory%, and network I/O.
+    Returns CPU%, memory usage/limit, memory%, network I/O, and PID count.
 
     Args:
         container: Container name or ID.
         host: Named host from config (defaults to default_host).
     """
-    fmt = '{"Name":"{{.Name}}","CPU":"{{.CPUPerc}}","MemUsage":"{{.MemUsage}}","MemPerc":"{{.MemPerc}}","NetIO":"{{.NetIO}}","BlockIO":"{{.BlockIO}}"}'
+    fmt = '{"Name":"{{.Name}}","CPU":"{{.CPUPerc}}","MemUsage":"{{.MemUsage}}","MemPerc":"{{.MemPerc}}","NetIO":"{{.NetIO}}","BlockIO":"{{.BlockIO}}","PIDs":"{{.PIDs}}"}'
     try:
         result = _run(host, f"docker stats --no-stream --format '{fmt}' {container}")
         ok = result["exit_code"] == 0
@@ -818,7 +842,8 @@ def stat_file(path: str, host: Optional[str] = None) -> dict:
 
 
 @mcp.tool()
-def list_directory(path: str, host: Optional[str] = None, all: bool = True) -> dict:
+def list_directory(path: str, host: Optional[str] = None, all: bool = True,
+                   use_sudo: bool = False) -> dict:
     """
     List the contents of a directory on a remote host with ownership and permission details.
 
@@ -830,10 +855,14 @@ def list_directory(path: str, host: Optional[str] = None, all: bool = True) -> d
         path: Absolute path to the directory on the remote host.
         host: Named host from config (defaults to default_host).
         all: Include hidden files (dot-files). Default True.
+        use_sudo: If True, run ls via sudo. Use for directories only accessible
+                  as root (e.g. /var/lib/docker/volumes/). Requires passwordless
+                  sudo on the target host.
     """
     try:
         all_flag = "-la" if all else "-l"
-        result = _run(host, f"ls {all_flag} --time-style=long-iso {path} 2>&1")
+        sudo_prefix = "sudo " if use_sudo else ""
+        result = _run(host, f"{sudo_prefix}ls {all_flag} --time-style=long-iso {path} 2>&1")
         ok = result["exit_code"] == 0
         if not ok:
             return {"ok": False, "path": path, "host": result["host"], "error": result["stdout"]}
@@ -875,7 +904,7 @@ def list_directory(path: str, host: Optional[str] = None, all: bool = True) -> d
 
 
 @mcp.tool()
-def backup_file(path: str, host: Optional[str] = None) -> dict:
+def backup_file(path: str, host: Optional[str] = None, use_sudo: bool = False) -> dict:
     """
     Create a timestamped backup of a file on a remote host before editing it.
 
@@ -885,9 +914,13 @@ def backup_file(path: str, host: Optional[str] = None) -> dict:
     Args:
         path: Absolute path to the file to back up.
         host: Named host from config (defaults to default_host).
+        use_sudo: If True, run cp via sudo. Use for root-owned files the SSH
+                  user cannot copy directly (e.g. files in /srv/ or /etc/).
+                  Requires passwordless sudo on the target host.
     """
     try:
-        result = _run(host, f"cp {path} {path}.backup.$(date +%Y%m%d-%H%M)")
+        sudo_prefix = "sudo " if use_sudo else ""
+        result = _run(host, f"{sudo_prefix}cp {path} {path}.backup.$(date +%Y%m%d-%H%M)")
         ok = result["exit_code"] == 0
         return {
             "ok": ok,
