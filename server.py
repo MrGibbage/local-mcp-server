@@ -1673,10 +1673,11 @@ def bookstack_move_page(page_id: int, entity_type: str, entity_id: int) -> dict:
         return {"ok": False, "error": "entity_type must be 'book' or 'chapter'."}
     try:
         base_url, headers = _bs_cfg()
+        body = {"chapter_id": entity_id} if entity_type == "chapter" else {"book_id": entity_id, "chapter_id": 0}
         resp = _requests.put(
-            f"{base_url}/api/pages/{page_id}/move",
+            f"{base_url}/api/pages/{page_id}",
             headers=headers,
-            json={"entity_type": entity_type, "entity_id": entity_id},
+            json=body,
             timeout=15,
         )
         resp.raise_for_status()
@@ -1685,7 +1686,8 @@ def bookstack_move_page(page_id: int, entity_type: str, entity_id: int) -> dict:
             "ok": True,
             "id": page.get("id"),
             "name": page.get("name"),
-            "url": page.get("url"),
+            "book_id": page.get("book_id"),
+            "chapter_id": page.get("chapter_id"),
         }
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
@@ -1705,9 +1707,9 @@ def bookstack_move_chapter(chapter_id: int, book_id: int) -> dict:
     try:
         base_url, headers = _bs_cfg()
         resp = _requests.put(
-            f"{base_url}/api/chapters/{chapter_id}/move",
+            f"{base_url}/api/chapters/{chapter_id}",
             headers=headers,
-            json={"entity_type": "book", "entity_id": book_id},
+            json={"book_id": book_id},
             timeout=15,
         )
         resp.raise_for_status()
