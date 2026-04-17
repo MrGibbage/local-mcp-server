@@ -152,6 +152,13 @@ def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200) -> 
     """
     Run an arbitrary shell command on a named host via SSH.
 
+    IMPORTANT: Before using ssh_exec for Docker, file, or system operations, first check
+    whether a dedicated MCP tool exists. This server has 44+ specialized tools (docker_ps,
+    docker_inspect, list_directory, stat_file, read_file, grep_file, etc.) that are deferred
+    and only visible after a ToolSearch call. Example: ToolSearch(query="docker inspect stat")
+    loads docker_inspect, stat_file, list_directory, etc. Use ssh_exec only when no dedicated
+    MCP tool covers your specific need.
+
     Returns stdout, stderr, exit_code, host, and command.
     If ssh_command_allowlist is set in config.yaml, only listed base commands
     are permitted.
@@ -873,7 +880,7 @@ def list_directory(path: str, host: Optional[str] = None, all: bool = True,
             if line.startswith("total "):
                 continue
             parts = line.split(None, 8)
-            if len(parts) < 9:
+            if len(parts) < 8:
                 continue
             perms, _, owner, group, size, date, time_, *name_parts = parts
             name = " ".join(name_parts)
