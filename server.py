@@ -352,6 +352,62 @@ def docker_exec(container: str, command: str, host: Optional[str] = None) -> dic
 
 
 @mcp.tool()
+def docker_capabilities(container: str, host: Optional[str] = None) -> dict:
+    """
+    Return decoded Linux capabilities for a running container.
+
+    Reads /proc/1/status inside the container to get raw hex capability masks,
+    then decodes them via capsh on the host. Requires capsh (libcap2-bin) on the
+    target host. Falls back to raw hex values if capsh is unavailable.
+
+    Args:
+        container: Container name or ID.
+        host: Named host from config (defaults to default_host).
+    """
+    try:
+        result = _run(host, f"docker exec {container} sh -c 'grep -E \"^Cap\" /proc/1/status'")
+        if result["exit_code"] != 0:
+            return {"ok": False, "container": container, "host": result["host"],
+                    "error": result["stderr"] or "Failed to read /proc/1/status"}
+
+        masks: dict[str, str] = {}
+        for line in result["stdout"].splitlines():
+            line = line.strip()
+            if ":" in line:
+                key, _, val = line.partition(":")
+                masks[key.strip()] = val.strip()
+
+        key_map = {
+            "CapInh": "inheritable",
+            "CapPrm": "permitted",
+            "CapEff": "effective",
+            "CapBnd": "bounding",
+            "CapAmb": "ambient",
+        }
+        capabilities: dict[str, list[str]] = {}
+        for cap_key, cap_name in key_map.items():
+            hex_val = masks.get(cap_key, "0000000000000000")
+            decode_result = _run(host, f"capsh --decode={hex_val}")
+            if decode_result["exit_code"] != 0:
+                capabilities[cap_name] = [f"raw:{hex_val}"]
+                continue
+            output = decode_result["stdout"].strip()
+            if "=" in output:
+                _, _, caps_str = output.partition("=")
+                cap_list = [c.strip() for c in caps_str.split(",") if c.strip()]
+            else:
+                cap_list = []
+            capabilities[cap_name] = cap_list
+
+        return {"ok": True, "container": container, "host": result["host"],
+                "capabilities": capabilities}
+    except ValueError as exc:
+        return {"ok": False, "container": container, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "container": container, "error": str(exc)}
+
+
+@mcp.tool()
 def docker_stats(container: str, host: Optional[str] = None) -> dict:
     """
     Get a one-shot resource usage snapshot for a Docker container.
@@ -1184,6 +1240,79 @@ def bookstack_update_page(page_id: int, markdown: Optional[str] = None, name: Op
         return {"ok": False, "error": str(exc)}
     except _requests.RequestException as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_patch_page(
+    page_id: int,
+    old_string: str,
+    new_string: str,
+    replace_all: bool = False,
+) -> dict:
+    """
+    Patch a BookStack page by replacing a string in its content.
+
+    Follows the same semantics as patch_file: old_string must appear exactly
+    once unless replace_all=True. Much faster than bookstack_update_page for
+    large pages since only the delta is described, not the full content.
+
+    Fetches the full page content directly (no truncation), applies the
+    replacement locally, then writes back via the API.
+
+    Args:
+        page_id: Numeric ID of the BookStack page.
+        old_string: The string to find (must be unique unless replace_all=True).
+        new_string: The replacement string.
+        replace_all: If True, replace all occurrences. Default False.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+
+        resp = _requests.get(f"{base_url}/api/pages/{page_id}", headers=headers, timeout=15)
+        resp.raise_for_status()
+        page = resp.json()
+
+        # Use markdown if available, else html — avoid 50KB truncation from bookstack_read_page
+        editor_type = "markdown" if page.get("markdown") else "html"
+        content = page.get("markdown") or page.get("html") or ""
+
+        count = content.count(old_string)
+        if count == 0:
+            return {"ok": False, "page_id": page_id, "error": "old_string not found in page content."}
+        if count > 1 and not replace_all:
+            return {
+                "ok": False,
+                "page_id": page_id,
+                "error": (
+                    f"old_string found {count} times — refusing to replace ambiguously. "
+                    "Expand old_string to include more surrounding context to make it unique, "
+                    "or set replace_all=True to replace all occurrences."
+                ),
+                "match_count": count,
+            }
+
+        new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
+
+        put_resp = _requests.put(
+            f"{base_url}/api/pages/{page_id}",
+            headers=headers,
+            json={editor_type: new_content},
+            timeout=15,
+        )
+        put_resp.raise_for_status()
+        updated = put_resp.json()
+
+        return {
+            "ok": True,
+            "id": updated.get("id"),
+            "name": updated.get("name"),
+            "url": updated.get("url"),
+            "replacements": count if replace_all else 1,
+        }
+    except ValueError as exc:
+        return {"ok": False, "page_id": page_id, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "page_id": page_id, "error": str(exc)}
 
 
 @mcp.tool()
