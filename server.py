@@ -1876,6 +1876,15 @@ if __name__ == "__main__":
 
     BASE_URL = "https://homelab-mcp.pelorus.org"
 
+    class BearerAuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            token = os.environ.get("MCP_AUTH_TOKEN")
+            if token and not request.url.path.startswith("/.well-known/"):
+                auth = request.headers.get("authorization", "")
+                if auth != f"Bearer {token}":
+                    return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            return await call_next(request)
+
     class StripAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
             print(f"MIDDLEWARE: {request.method} {request.url.path}", flush=True)
@@ -1959,6 +1968,7 @@ if __name__ == "__main__":
         lifespan=lifespan
     )
     app.add_middleware(StripAuthMiddleware)
+    app.add_middleware(BearerAuthMiddleware)
 
     print(f"Starting Homelab MCP server on {HOST}:{PORT} (Streamable HTTP transport)", flush=True)
     uvicorn.run(app, host=HOST, port=PORT)

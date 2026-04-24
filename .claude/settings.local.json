@@ -20,7 +20,8 @@
       "mcp__claude_ai_Local_MCP_Server__bookstack_update_page",
       "mcp__claude_ai_Local_MCP_Server__list_hosts",
       "mcp__claude_ai_Local_MCP_Server__read_file",
-      "WebFetch(domain:bookstack.bassopaolo.com)"
+      "WebFetch(domain:bookstack.bassopaolo.com)",
+      "WebSearch"
     ]
   }
 }

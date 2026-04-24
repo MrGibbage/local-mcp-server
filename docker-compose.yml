@@ -11,3 +11,4 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - CONFIG_PATH=/app/config.yaml
+      - MCP_AUTH_TOKEN=changeme  # Set this to your real secret token
