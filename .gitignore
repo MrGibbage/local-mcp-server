@@ -21,6 +21,13 @@ build/
 venv/
 env/
 
+# Local Caddy sidecar (not deployed — Caddy runs on OPNsense)
+Caddyfile
+certs/
+
+# Debug/scratch files
+mcp_output.txt
+
 # Editor
 .vscode/
 .idea/
