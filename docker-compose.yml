@@ -1,14 +1,23 @@
+# IMPORTANT — GIT WORKFLOW
+# Repo: github.com/mrgibbage/local-mcp-server
+# After any change to tracked files: git -C /srv/local-mcp-server push origin main
+# Then pull in VS Code on Windows (C:/github-projects/local-mcp-server).
+# config.yaml and keys/ are gitignored — edit manually on docker-server only.
+
 services:
   homelab-mcp:
     build: .
     container_name: homelab-mcp
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+      - "diun.enable=false"
     ports:
       - "8090:8080"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - /home/skip/.ssh:/keys:ro
+      - ./keys:/keys:ro
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - CONFIG_PATH=/app/config.yaml
-      - MCP_AUTH_TOKEN=changeme  # Set this to your real secret token
+      - MCP_AUTH_TOKEN=f0324a9ef85f8e6b798f49ed8d86438b8239e4a653bca2632902141a16f9d0dd
