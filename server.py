@@ -694,6 +694,7 @@ def patch_file(
     new_string: str,
     host: Optional[str] = None,
     replace_all: bool = False,
+    use_sudo: bool = False,
 ) -> dict:
     """
     Make a targeted string replacement in a remote file over SSH (SFTP).
@@ -713,27 +714,69 @@ def patch_file(
         new_string: String to replace it with.
         host: Named host from config (defaults to default_host).
         replace_all: If True, replace every occurrence. Default False.
+        use_sudo: If True, read via 'sudo cat' and write via 'sudo tee'. Use for
+                  root-owned files the SSH user cannot access directly. Requires
+                  passwordless sudo on the target host.
     """
     try:
         host_name, host_cfg = _resolve_host(host)
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "host": host, "path": path}
 
+    connect_kwargs: dict[str, Any] = {
+        "hostname": host_cfg["hostname"],
+        "username": host_cfg.get("user", "root"),
+        "timeout": 30,
+    }
+    key_path = host_cfg.get("key_path")
+    if key_path:
+        connect_kwargs["key_filename"] = str(key_path)
+    port = host_cfg.get("port", 22)
+    if port != 22:
+        connect_kwargs["port"] = int(port)
+
+    if use_sudo:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(**connect_kwargs)
+            _, stdout_r, stderr_r = client.exec_command(f"sudo cat {path}")
+            content = stdout_r.read().decode("utf-8", errors="replace")
+            if stdout_r.channel.recv_exit_status() != 0:
+                err = stderr_r.read().decode("utf-8", errors="replace").strip()
+                return {"ok": False, "error": err, "host": host_name, "path": path}
+            count = content.count(old_string)
+            if count == 0:
+                return {"ok": False, "error": "old_string not found in file.", "host": host_name, "path": path}
+            if count > 1 and not replace_all:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"old_string found {count} times — refusing to replace ambiguously. "
+                        "Expand old_string to include more context to make it unique, "
+                        "or set replace_all=True to replace all occurrences."
+                    ),
+                    "match_count": count,
+                    "host": host_name,
+                    "path": path,
+                }
+            new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
+            stdin_w, stdout_w, stderr_w = client.exec_command(f"sudo tee {path} > /dev/null")
+            stdin_w.write(new_content.encode("utf-8"))
+            stdin_w.channel.shutdown_write()
+            exit_code = stdout_w.channel.recv_exit_status()
+            err = stderr_w.read().decode("utf-8", errors="replace").strip()
+            if exit_code != 0:
+                return {"ok": False, "error": err, "host": host_name, "path": path}
+            return {"ok": True, "host": host_name, "path": path, "replacements": count if replace_all else 1}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc), "host": host_name, "path": path}
+        finally:
+            client.close()
+
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        connect_kwargs: dict[str, Any] = {
-            "hostname": host_cfg["hostname"],
-            "username": host_cfg.get("user", "root"),
-            "timeout": 30,
-        }
-        key_path = host_cfg.get("key_path")
-        if key_path:
-            connect_kwargs["key_filename"] = str(key_path)
-        port = host_cfg.get("port", 22)
-        if port != 22:
-            connect_kwargs["port"] = int(port)
-
         client.connect(**connect_kwargs)
         sftp = client.open_sftp()
 
