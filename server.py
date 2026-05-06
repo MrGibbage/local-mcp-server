@@ -11,14 +11,19 @@ import json
 import os
 import stat as _stat
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote as _url_quote
 
 import paramiko
 import requests as _requests
+import urllib3
 import yaml
 from mcp.server.fastmcp import FastMCP
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ---------------------------------------------------------------------------
 # Config loading
@@ -118,6 +123,58 @@ def _run(host: str | None, command: str) -> dict[str, Any]:
     result = _ssh_exec(host_cfg, command)
     result["host"] = host_name
     return result
+
+
+# ---------------------------------------------------------------------------
+# Proxmox API helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_proxmox_node(host: str) -> dict:
+    """Return node config dict for a given name or IP address."""
+    nodes = CONFIG.get("proxmox_nodes", [])
+    if not nodes:
+        raise ValueError("proxmox_nodes not configured in config.yaml")
+    for node in nodes:
+        if node.get("name") == host or node.get("host") == host:
+            return node
+    available = [f"{n.get('name')} ({n.get('host')})" for n in nodes]
+    raise ValueError(f"Proxmox node '{host}' not found in config. Available: {available}")
+
+
+def _proxmox_api(node_cfg: dict, method: str, path: str, **kwargs) -> dict:
+    """Make an authenticated Proxmox API request. Returns parsed JSON response."""
+    base_url = f"https://{node_cfg['host']}:8006/api2/json"
+    headers = {"Authorization": f"PVEAPIToken={node_cfg['api_token']}"}
+    resp = _requests.request(
+        method,
+        f"{base_url}{path}",
+        headers=headers,
+        verify=False,
+        timeout=30,
+        **kwargs,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _proxmox_wait_task(node_cfg: dict, upid: str, timeout: int = 60) -> dict:
+    """Poll a Proxmox task UPID until it stops or timeout expires."""
+    node = node_cfg["node"]
+    encoded_upid = _url_quote(upid, safe="")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        resp = _proxmox_api(node_cfg, "GET", f"/nodes/{node}/tasks/{encoded_upid}/status")
+        data = resp.get("data", {})
+        if data.get("status") == "stopped":
+            exitstatus = data.get("exitstatus", "")
+            return {
+                "finished": True,
+                "exitstatus": exitstatus,
+                "ok": exitstatus == "OK",
+            }
+        time.sleep(1)
+    return {"finished": False, "ok": False, "error": f"Task did not complete within {timeout}s"}
 
 
 # ---------------------------------------------------------------------------
@@ -1128,6 +1185,288 @@ def memory_usage(host: Optional[str] = None) -> dict:
         return _run(host, "free -h")
     except ValueError as exc:
         return {"stdout": "", "stderr": str(exc), "exit_code": -1}
+
+
+# ---------------------------------------------------------------------------
+# Tools — Proxmox (uses REST API)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def proxmox_vm_list(host: str) -> dict:
+    """
+    List all VMs and containers on a Proxmox node.
+
+    Queries both QEMU VMs and LXC containers and returns a combined list
+    sorted by VMID.
+
+    Returns vmid, name, status, uptime, and type ('qemu' or 'lxc') for each.
+
+    Args:
+        host: Proxmox node name from config (e.g. 'proxmox1') or bare IP address.
+    """
+    try:
+        node_cfg = _resolve_proxmox_node(host)
+        node = node_cfg["node"]
+        vms_resp = _proxmox_api(node_cfg, "GET", f"/nodes/{node}/qemu")
+        lxc_resp = _proxmox_api(node_cfg, "GET", f"/nodes/{node}/lxc")
+        vms = [
+            {
+                "vmid": vm.get("vmid"),
+                "name": vm.get("name"),
+                "status": vm.get("status"),
+                "uptime": vm.get("uptime"),
+                "type": "qemu",
+            }
+            for vm in vms_resp.get("data", [])
+        ]
+        containers = [
+            {
+                "vmid": ct.get("vmid"),
+                "name": ct.get("name"),
+                "status": ct.get("status"),
+                "uptime": ct.get("uptime"),
+                "type": "lxc",
+            }
+            for ct in lxc_resp.get("data", [])
+        ]
+        all_vms = sorted(vms + containers, key=lambda x: x.get("vmid") or 0)
+        return {
+            "ok": True,
+            "node": node,
+            "host": node_cfg["host"],
+            "vms": all_vms,
+            "count": len(all_vms),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def proxmox_snapshot_list(host: str, vmid: int) -> dict:
+    """
+    List all snapshots for a Proxmox VM or container.
+
+    Returns snapshot name, description, and creation time (Unix timestamp).
+    The 'current' pseudo-snapshot is excluded from results.
+
+    Args:
+        host: Proxmox node name from config (e.g. 'proxmox1') or bare IP address.
+        vmid: VM or container ID.
+    """
+    try:
+        node_cfg = _resolve_proxmox_node(host)
+        node = node_cfg["node"]
+        # Try qemu first, fall back to lxc
+        vm_type = "qemu"
+        try:
+            resp = _proxmox_api(node_cfg, "GET", f"/nodes/{node}/qemu/{vmid}/snapshot")
+        except _requests.RequestException:
+            vm_type = "lxc"
+            resp = _proxmox_api(node_cfg, "GET", f"/nodes/{node}/lxc/{vmid}/snapshot")
+        snapshots = [
+            {
+                "name": snap.get("name"),
+                "description": snap.get("description", ""),
+                "snaptime": snap.get("snaptime"),
+            }
+            for snap in resp.get("data", [])
+            if snap.get("name") != "current"
+        ]
+        return {
+            "ok": True,
+            "node": node,
+            "vmid": vmid,
+            "vm_type": vm_type,
+            "snapshots": snapshots,
+            "count": len(snapshots),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def proxmox_snapshot_create(host: str, vmid: int, snapname: str, description: str = "") -> dict:
+    """
+    Create a disk-only snapshot for a Proxmox VM or container.
+
+    Waits for the task to complete before returning — polls until status is
+    'stopped', then reports success or failure based on exitstatus. This is
+    more reliable than pvesh, which is fire-and-forget.
+
+    Args:
+        host: Proxmox node name from config (e.g. 'proxmox1') or bare IP address.
+        vmid: VM or container ID.
+        snapname: Name for the new snapshot (no spaces).
+        description: Optional description for the snapshot.
+    """
+    try:
+        node_cfg = _resolve_proxmox_node(host)
+        node = node_cfg["node"]
+        body: dict[str, Any] = {"snapname": snapname, "vmstate": 0}
+        if description:
+            body["description"] = description
+        # Try qemu first, fall back to lxc
+        vm_type = "qemu"
+        try:
+            resp = _proxmox_api(
+                node_cfg, "POST", f"/nodes/{node}/qemu/{vmid}/snapshot", json=body
+            )
+        except _requests.RequestException:
+            vm_type = "lxc"
+            lxc_body = {"snapname": snapname}
+            if description:
+                lxc_body["description"] = description
+            resp = _proxmox_api(
+                node_cfg, "POST", f"/nodes/{node}/lxc/{vmid}/snapshot", json=lxc_body
+            )
+        upid = resp.get("data", "")
+        task_result = _proxmox_wait_task(node_cfg, upid)
+        return {
+            "ok": task_result["ok"],
+            "node": node,
+            "vmid": vmid,
+            "vm_type": vm_type,
+            "snapname": snapname,
+            "upid": upid,
+            "exitstatus": task_result.get("exitstatus"),
+            **({"error": task_result["error"]} if not task_result["ok"] and "error" in task_result else {}),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def proxmox_snapshot_delete(host: str, vmid: int, snapname: str) -> dict:
+    """
+    Delete a snapshot from a Proxmox VM or container.
+
+    Waits for the task to complete before returning, so callers know whether
+    the delete actually succeeded.
+
+    Args:
+        host: Proxmox node name from config (e.g. 'proxmox1') or bare IP address.
+        vmid: VM or container ID.
+        snapname: Name of the snapshot to delete.
+    """
+    try:
+        node_cfg = _resolve_proxmox_node(host)
+        node = node_cfg["node"]
+        # Try qemu first, fall back to lxc
+        vm_type = "qemu"
+        try:
+            resp = _proxmox_api(
+                node_cfg, "DELETE", f"/nodes/{node}/qemu/{vmid}/snapshot/{snapname}"
+            )
+        except _requests.RequestException:
+            vm_type = "lxc"
+            resp = _proxmox_api(
+                node_cfg, "DELETE", f"/nodes/{node}/lxc/{vmid}/snapshot/{snapname}"
+            )
+        upid = resp.get("data", "")
+        task_result = _proxmox_wait_task(node_cfg, upid)
+        return {
+            "ok": task_result["ok"],
+            "node": node,
+            "vmid": vmid,
+            "vm_type": vm_type,
+            "snapname": snapname,
+            "upid": upid,
+            "exitstatus": task_result.get("exitstatus"),
+            **({"error": task_result["error"]} if not task_result["ok"] and "error" in task_result else {}),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def proxmox_task_status(host: str, upid: str) -> dict:
+    """
+    Poll the current status of a Proxmox task by its UPID.
+
+    Returns the task status, exitstatus (if finished), and whether it is
+    still running. Useful for checking tasks independently of snapshot tools.
+
+    Args:
+        host: Proxmox node name from config (e.g. 'proxmox1') or bare IP address.
+        upid: Task UPID string (returned by snapshot_create, snapshot_delete, etc.).
+    """
+    try:
+        node_cfg = _resolve_proxmox_node(host)
+        node = node_cfg["node"]
+        encoded_upid = _url_quote(upid, safe="")
+        resp = _proxmox_api(node_cfg, "GET", f"/nodes/{node}/tasks/{encoded_upid}/status")
+        data = resp.get("data", {})
+        return {
+            "ok": True,
+            "node": node,
+            "upid": upid,
+            "status": data.get("status"),
+            "exitstatus": data.get("exitstatus"),
+            "running": data.get("status") != "stopped",
+            "type": data.get("type"),
+            "user": data.get("user"),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def proxmox_storage_info(host: str) -> dict:
+    """
+    Return storage status for all active storage on a Proxmox node.
+
+    Includes name, type, total/used/free space in bytes and GB, and percentage
+    used. Particularly useful for monitoring LVM thin pool fill on pve2.
+
+    Args:
+        host: Proxmox node name from config (e.g. 'proxmox2') or bare IP address.
+    """
+    try:
+        node_cfg = _resolve_proxmox_node(host)
+        node = node_cfg["node"]
+        resp = _proxmox_api(node_cfg, "GET", f"/nodes/{node}/storage")
+        storages = []
+        for s in resp.get("data", []):
+            if not s.get("active"):
+                continue
+            total = s.get("total", 0)
+            used = s.get("used", 0)
+            avail = s.get("avail", 0)
+            used_pct = round(used / total * 100, 1) if total else 0
+            storages.append({
+                "name": s.get("storage"),
+                "type": s.get("type"),
+                "total_bytes": total,
+                "used_bytes": used,
+                "free_bytes": avail,
+                "total_gb": round(total / 1_073_741_824, 2),
+                "used_gb": round(used / 1_073_741_824, 2),
+                "free_gb": round(avail / 1_073_741_824, 2),
+                "used_pct": used_pct,
+            })
+        return {
+            "ok": True,
+            "node": node,
+            "host": node_cfg["host"],
+            "storages": storages,
+            "count": len(storages),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
 
 # ---------------------------------------------------------------------------
 # Tools — BookStack (uses REST API)
