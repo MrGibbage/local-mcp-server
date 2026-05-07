@@ -502,7 +502,7 @@ def docker_compose_up(path: str, host: Optional[str] = None) -> dict:
         host: Named host from config (defaults to default_host).
     """
     try:
-        result = _run(host, f"docker compose -f {path}/docker-compose.yml up -d 2>&1")
+        result = _run(host, f"cd {path} && docker compose up -d 2>&1")
         ok = result["exit_code"] == 0
         lines = result["stdout"].splitlines()
         return {"ok": ok, "host": result["host"], "path": path,
@@ -522,7 +522,7 @@ def docker_compose_down(path: str, host: Optional[str] = None) -> dict:
         host: Named host from config (defaults to default_host).
     """
     try:
-        result = _run(host, f"docker compose -f {path}/docker-compose.yml down 2>&1")
+        result = _run(host, f"cd {path} && docker compose down 2>&1")
         ok = result["exit_code"] == 0
         lines = result["stdout"].splitlines()
         return {"ok": ok, "host": result["host"], "path": path,
@@ -1656,7 +1656,7 @@ def bookstack_patch_page(
 
         # Use markdown if available, else html — avoid 50KB truncation from bookstack_read_page
         editor_type = "markdown" if page.get("markdown") else "html"
-        content = page.get("markdown") or page.get("html") or ""
+        content = (page.get("markdown") or page.get("html") or "").replace("\r\n", "\n")
 
         count = content.count(old_string)
         if count == 0:

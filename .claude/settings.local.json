@@ -21,7 +21,15 @@
       "mcp__claude_ai_Local_MCP_Server__list_hosts",
       "mcp__claude_ai_Local_MCP_Server__read_file",
       "WebFetch(domain:bookstack.bassopaolo.com)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('server.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(docker restart *)",
+      "Bash(awk '/^# Tools/{section=$0; count=0} /^@mcp/{count++} /^# Tools/{if\\(count>0\\) print section\": \"count; section=$0; count=0} END{print section\": \"count}')",
+      "Bash(awk '/^# Tools —/{if\\(section\\) print section\": \"count; section=$0; count=0} /^@mcp\\\\.tool\\\\\\(\\\\\\)/{count++} END{print section\": \"count}' /srv/local-mcp-server/server.py)",
+      "Bash(docker compose *)"
     ]
   }
 }
