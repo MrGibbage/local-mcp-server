@@ -245,15 +245,20 @@ def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200) -> 
 
 
 @mcp.tool()
-def docker_ps(host: Optional[str] = None) -> dict:
+def docker_ps(host: Optional[str] = None, filter: Optional[str] = None) -> dict:
     """
     List running Docker containers on a host.
 
     Returns a list of containers with name, image, status, and ports.
+
+    Args:
+        host: Named host from config (defaults to default_host).
+        filter: Optional filter string passed to docker ps --filter (e.g. "name=loki").
     """
     fmt = '{"Name":"{{.Names}}","Image":"{{.Image}}","Status":"{{.Status}}","Ports":"{{.Ports}}"}'
     try:
-        result = _run(host, f"docker ps --format '{fmt}'")
+        filter_flag = f" --filter {filter}" if filter else ""
+        result = _run(host, f"docker ps{filter_flag} --format '{fmt}'")
         if result["exit_code"] != 0:
             return {"error": result["stderr"], "exit_code": result["exit_code"]}
         containers = []
@@ -1060,8 +1065,32 @@ def list_directory(path: str, host: Optional[str] = None, all: bool = True,
                 entry["symlink_target"] = target
             entries.append(entry)
 
+        if not entries and use_sudo:
+            return {"ok": False, "path": path, "host": result["host"],
+                    "error": "sudo ls succeeded but returned no entries — sudo may lack a TTY or the path is empty."}
         return {"ok": True, "path": path, "host": result["host"],
                 "entries": entries, "count": len(entries)}
+    except ValueError as exc:
+        return {"ok": False, "path": path, "error": str(exc)}
+
+
+@mcp.tool()
+def make_directory(path: str, host: Optional[str] = None, use_sudo: bool = False) -> dict:
+    """
+    Create a directory (and any missing parents) on a remote host.
+
+    Args:
+        path: Absolute path of the directory to create.
+        host: Named host from config (defaults to default_host).
+        use_sudo: If True, run mkdir via sudo. Required when the parent directory
+                  is root-owned (e.g. /srv/, /etc/). Requires passwordless sudo.
+    """
+    try:
+        sudo_prefix = "sudo " if use_sudo else ""
+        result = _run(host, f"{sudo_prefix}mkdir -p {path} 2>&1")
+        ok = result["exit_code"] == 0
+        return {"ok": ok, "path": path, "host": result["host"],
+                **({"error": result["stdout"]} if not ok else {})}
     except ValueError as exc:
         return {"ok": False, "path": path, "error": str(exc)}
 
