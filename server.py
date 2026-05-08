@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re as _re
 import stat as _stat
 import sys
 import time
@@ -2509,6 +2510,534 @@ def loki_query(
 
         return {"ok": True, "query": logql, "since": since,
                 "count": len(lines), "lines": lines[:limit]}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Tools — OPNsense (Caddy + DHCP)
+# ---------------------------------------------------------------------------
+
+_CF_API_BASE = "https://api.cloudflare.com/client/v4"
+
+
+def _opnsense_api(method: str, path: str, **kwargs) -> dict:
+    """Make an authenticated OPNsense API request. Returns parsed JSON."""
+    cfg = CONFIG.get("opnsense", {})
+    base_url = cfg.get("url", "").rstrip("/")
+    api_key = cfg.get("api_key", "")
+    api_secret = cfg.get("api_secret", "")
+    if not (base_url and api_key and api_secret):
+        raise ValueError(
+            "opnsense config missing — set opnsense.url, api_key, api_secret in config.yaml"
+        )
+    resp = _requests.request(
+        method,
+        f"{base_url}/api{path}",
+        auth=(api_key, api_secret),
+        verify=False,
+        timeout=30,
+        **kwargs,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _caddy_parse_destination(to_destination: str) -> tuple[str, str, str]:
+    """Parse 'http://host:port' into (http_tls, to_domain, to_port)."""
+    from urllib.parse import urlparse
+    parsed = urlparse(to_destination if "://" in to_destination else f"http://{to_destination}")
+    http_tls = "1" if parsed.scheme == "https" else "0"
+    to_domain = parsed.hostname or ""
+    to_port = str(parsed.port) if parsed.port else ("443" if http_tls == "1" else "80")
+    return http_tls, to_domain, to_port
+
+
+@mcp.tool()
+def caddy_list_routes() -> dict:
+    """
+    List all Caddy reverse proxy routes configured on OPNsense.
+
+    Joins the reverse-proxy domain entries with their handle (backend) entries
+    to return each route's UUID, from_domain, backend address, enabled state,
+    and description.
+    """
+    try:
+        rev_data = _opnsense_api(
+            "POST",
+            "/caddy/ReverseProxy/searchReverseProxy",
+            json={"current": 1, "rowCount": 100, "searchPhrase": ""},
+        )
+        han_data = _opnsense_api(
+            "POST",
+            "/caddy/ReverseProxy/searchHandle",
+            json={"current": 1, "rowCount": 500, "searchPhrase": ""},
+        )
+        # Index handles by the reverse UUID they reference
+        handles: dict[str, list] = {}
+        for h in han_data.get("rows", []):
+            rev_uuid = h.get("reverse", "")
+            handles.setdefault(rev_uuid, []).append(h)
+
+        routes = []
+        for r in rev_data.get("rows", []):
+            uuid = r.get("uuid", "")
+            hs = handles.get(uuid, [])
+            backends = []
+            for h in hs:
+                proto = "https://" if h.get("HttpTls") == "1" else "http://"
+                domain = h.get("ToDomain", "")
+                port = h.get("ToPort", "")
+                backends.append({
+                    "handle_uuid": h.get("uuid"),
+                    "backend": f"{proto}{domain}:{port}" if port else f"{proto}{domain}",
+                })
+            routes.append({
+                "uuid": uuid,
+                "from_domain": r.get("FromDomain", ""),
+                "enabled": r.get("enabled", "1") in (True, "1", 1),
+                "description": r.get("description", ""),
+                "backends": backends,
+            })
+        return {"ok": True, "routes": routes, "count": len(routes)}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def caddy_add_route(
+    from_domain: str,
+    to_destination: str,
+    description: Optional[str] = None,
+) -> dict:
+    """
+    Add a Caddy reverse proxy route on OPNsense and apply the configuration.
+
+    Creates both the reverse-proxy domain entry and its handle (backend) entry,
+    then reconfigures Caddy. Loopback upstreams are rejected.
+
+    Args:
+        from_domain: Incoming hostname to match (e.g. "app.pelorus.org").
+        to_destination: Backend URL (e.g. "http://192.168.0.10:3000").
+        description: Optional human-readable label for this route.
+    """
+    if _re.search(r"127\.\d+\.\d+\.\d+|localhost|::1", to_destination):
+        return {"ok": False, "error": "Loopback upstream addresses are not allowed."}
+    try:
+        http_tls, to_domain, to_port = _caddy_parse_destination(to_destination)
+
+        rev = _opnsense_api("POST", "/caddy/ReverseProxy/addReverseProxy", json={
+            "reverseproxy": {
+                "FromDomain": from_domain,
+                "enabled": "1",
+                "description": description or "",
+                "DnsChallenge": "1",
+            }
+        })
+        if rev.get("result") not in ("saved", "ok"):
+            return {"ok": False, "error": f"Failed to create reverse entry: {rev}"}
+        reverse_uuid = rev.get("uuid", "")
+
+        han = _opnsense_api("POST", "/caddy/ReverseProxy/addHandle", json={
+            "handle": {
+                "reverse": reverse_uuid,
+                "enabled": "1",
+                "HandleType": "handle",
+                "HandleDirective": "reverse_proxy",
+                "ToDomain": to_domain,
+                "ToPort": to_port,
+                "HttpTls": http_tls,
+                "description": description or "",
+            }
+        })
+        if han.get("result") not in ("saved", "ok"):
+            # Roll back the reverse entry we just created
+            _opnsense_api("POST", f"/caddy/ReverseProxy/delReverseProxy/{reverse_uuid}")
+            return {"ok": False, "error": f"Failed to create handle entry: {han}"}
+
+        _opnsense_api("POST", "/caddy/service/reconfigure")
+        return {
+            "ok": True,
+            "from_domain": from_domain,
+            "to_destination": to_destination,
+            "uuid": reverse_uuid,
+            "handle_uuid": han.get("uuid"),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def caddy_remove_route(uuid: str) -> dict:
+    """
+    Remove a Caddy reverse proxy route by UUID and apply the configuration.
+
+    Deletes both the reverse-proxy domain entry and any associated handle
+    (backend) entries, then reconfigures Caddy. Use caddy_list_routes to
+    find the UUID.
+
+    Args:
+        uuid: UUID of the reverse-proxy entry to remove (from caddy_list_routes).
+    """
+    try:
+        # Find and delete all handles referencing this reverse entry
+        han_data = _opnsense_api(
+            "POST",
+            "/caddy/ReverseProxy/searchHandle",
+            json={"current": 1, "rowCount": 500, "searchPhrase": ""},
+        )
+        for h in han_data.get("rows", []):
+            if h.get("reverse") == uuid:
+                _opnsense_api("POST", f"/caddy/ReverseProxy/delHandle/{h['uuid']}")
+
+        data = _opnsense_api("POST", f"/caddy/ReverseProxy/delReverseProxy/{uuid}")
+        if data.get("result") not in ("deleted", "ok"):
+            return {"ok": False, "error": f"Unexpected API response: {data}"}
+        _opnsense_api("POST", "/caddy/service/reconfigure")
+        return {"ok": True, "uuid": uuid, "deleted": True}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def opnsense_list_dhcp_leases(search: Optional[str] = None) -> dict:
+    """
+    List active DHCP leases from OPNsense.
+
+    Returns hostname, IP address, MAC address, and lease state for each client.
+
+    Args:
+        search: Optional filter string matched against hostname, IP, or MAC.
+    """
+    try:
+        data = _opnsense_api(
+            "POST",
+            "/dhcpv4/leases/searchLease",
+            json={"current": 1, "rowCount": 500, "searchPhrase": search or ""},
+        )
+        rows = data.get("rows", [])
+        leases = [
+            {
+                "hostname": r.get("hostname", ""),
+                "ip": r.get("address", r.get("ip", "")),
+                "mac": r.get("mac", ""),
+                "state": r.get("state", ""),
+                "interface": r.get("if", r.get("interface", "")),
+            }
+            for r in rows
+        ]
+        return {"ok": True, "leases": leases, "count": len(leases)}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Tools — Cloudflare Tunnel
+# ---------------------------------------------------------------------------
+
+
+def _cf_tunnel_cfg() -> tuple[str, str, dict]:
+    """Return (account_id, tunnel_id, headers) for Cloudflare Tunnel API calls."""
+    cfg = CONFIG.get("cloudflare", {})
+    account_id = cfg.get("account_id", "")
+    tunnel_id = cfg.get("tunnel_id", "")
+    token = cfg.get("tunnel_api_token", "")
+    if not (account_id and tunnel_id and token):
+        raise ValueError(
+            "cloudflare tunnel config missing — set cloudflare.account_id, "
+            "tunnel_id, tunnel_api_token in config.yaml"
+        )
+    return account_id, tunnel_id, {"Authorization": f"Bearer {token}"}
+
+
+def _cf_access_cfg() -> tuple[str, dict]:
+    """Return (account_id, headers) for Cloudflare Access API calls."""
+    cfg = CONFIG.get("cloudflare", {})
+    account_id = cfg.get("account_id", "")
+    token = cfg.get("access_api_token", "")
+    if not (account_id and token):
+        raise ValueError(
+            "cloudflare access config missing — set cloudflare.account_id, "
+            "access_api_token in config.yaml"
+        )
+    return account_id, {"Authorization": f"Bearer {token}"}
+
+
+def _cf_get_tunnel_config(account_id: str, tunnel_id: str, headers: dict) -> dict:
+    """Fetch the full tunnel ingress configuration from Cloudflare."""
+    resp = _requests.get(
+        f"{_CF_API_BASE}/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
+        headers=headers,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success"):
+        raise ValueError(f"Cloudflare API error: {data.get('errors')}")
+    return data.get("result", {})
+
+
+def _cf_put_tunnel_config(account_id: str, tunnel_id: str, headers: dict, config: dict) -> dict:
+    """Replace the tunnel ingress configuration on Cloudflare."""
+    resp = _requests.put(
+        f"{_CF_API_BASE}/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
+        headers={**headers, "Content-Type": "application/json"},
+        json={"config": config},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success"):
+        raise ValueError(f"Cloudflare API error: {data.get('errors')}")
+    return data.get("result", {})
+
+
+@mcp.tool()
+def cloudflare_list_tunnel_routes() -> dict:
+    """
+    List all ingress routes configured in the Cloudflare Tunnel.
+
+    Returns each route's public hostname and backend service URL. The
+    catch-all rule (no hostname) is excluded from the results.
+    """
+    try:
+        account_id, tunnel_id, headers = _cf_tunnel_cfg()
+        result = _cf_get_tunnel_config(account_id, tunnel_id, headers)
+        ingress = result.get("config", {}).get("ingress", [])
+        routes = [
+            {
+                "hostname": rule.get("hostname", ""),
+                "service": rule.get("service", ""),
+                "origin_request": rule.get("originRequest", {}),
+            }
+            for rule in ingress
+            if rule.get("hostname")
+        ]
+        return {"ok": True, "routes": routes, "count": len(routes)}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def cloudflare_add_tunnel_route(
+    hostname: str,
+    service: str,
+    no_tls_verify: bool = False,
+) -> dict:
+    """
+    Add an ingress route to the Cloudflare Tunnel.
+
+    Fetches the current tunnel config, inserts the new route before the catch-all
+    rule, and pushes the updated config. Loopback backends are rejected.
+
+    Args:
+        hostname: Public hostname to route (e.g. "app.pelorus.org").
+        service: Internal backend URL (e.g. "http://192.168.0.10:3000").
+        no_tls_verify: Skip TLS verification for the backend. Default False.
+    """
+    if _re.search(r"127\.\d+\.\d+\.\d+|//localhost", service):
+        return {"ok": False, "error": "Loopback backend addresses are not allowed."}
+    try:
+        account_id, tunnel_id, headers = _cf_tunnel_cfg()
+        result = _cf_get_tunnel_config(account_id, tunnel_id, headers)
+        config = result.get("config", {})
+        ingress: list = config.get("ingress", [{"service": "http_status:404"}])
+
+        if any(r.get("hostname") == hostname for r in ingress):
+            return {"ok": False, "error": f"Route for '{hostname}' already exists."}
+
+        new_rule: dict[str, Any] = {"hostname": hostname, "service": service}
+        if no_tls_verify:
+            new_rule["originRequest"] = {"noTLSVerify": True}
+
+        # Insert before the catch-all (last entry, which has no hostname)
+        if ingress and not ingress[-1].get("hostname"):
+            ingress = ingress[:-1] + [new_rule, ingress[-1]]
+        else:
+            ingress = ingress + [new_rule]
+
+        config["ingress"] = ingress
+        _cf_put_tunnel_config(account_id, tunnel_id, headers, config)
+        return {"ok": True, "hostname": hostname, "service": service, "tunnel_id": tunnel_id}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def cloudflare_remove_tunnel_route(hostname: str) -> dict:
+    """
+    Remove an ingress route from the Cloudflare Tunnel by hostname.
+
+    Fetches the current tunnel config, removes the matching route, and pushes
+    the updated config. The catch-all rule is never removed.
+
+    Args:
+        hostname: Public hostname of the route to remove (e.g. "app.pelorus.org").
+    """
+    try:
+        account_id, tunnel_id, headers = _cf_tunnel_cfg()
+        result = _cf_get_tunnel_config(account_id, tunnel_id, headers)
+        config = result.get("config", {})
+        ingress: list = config.get("ingress", [])
+
+        named = [r for r in ingress if r.get("hostname")]
+        filtered = [r for r in ingress if r.get("hostname") != hostname]
+
+        if len(named) == len([r for r in filtered if r.get("hostname")]):
+            return {"ok": False, "error": f"No route found for hostname '{hostname}'."}
+
+        config["ingress"] = filtered
+        _cf_put_tunnel_config(account_id, tunnel_id, headers, config)
+        return {"ok": True, "hostname": hostname, "removed": True, "tunnel_id": tunnel_id}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Tools — Cloudflare Access
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def cloudflare_list_access_policies() -> dict:
+    """
+    List all Cloudflare Access applications and their associated policies.
+
+    Returns each application's name, domain, session duration, and a summary
+    of its allow/block policies including which identities are permitted.
+    """
+    try:
+        account_id, headers = _cf_access_cfg()
+
+        resp = _requests.get(
+            f"{_CF_API_BASE}/accounts/{account_id}/access/apps",
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("success"):
+            return {"ok": False, "error": str(data.get("errors"))}
+
+        apps = []
+        for app in data.get("result", []):
+            app_id = app.get("id")
+            pol_resp = _requests.get(
+                f"{_CF_API_BASE}/accounts/{account_id}/access/apps/{app_id}/policies",
+                headers=headers,
+                timeout=30,
+            )
+            pol_resp.raise_for_status()
+            pol_data = pol_resp.json()
+            policies = [
+                {
+                    "name": p.get("name"),
+                    "decision": p.get("decision"),
+                    "include": p.get("include", []),
+                }
+                for p in pol_data.get("result", [])
+            ]
+            apps.append({
+                "id": app_id,
+                "name": app.get("name"),
+                "domain": app.get("domain"),
+                "session_duration": app.get("session_duration"),
+                "policies": policies,
+            })
+
+        return {"ok": True, "apps": apps, "count": len(apps)}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def cloudflare_add_access_policy(
+    hostname: str,
+    name: str,
+    allowed_emails: str,
+    session_duration: str = "24h",
+) -> dict:
+    """
+    Create a Cloudflare Access application and allow policy for a hostname.
+
+    Creates the Access Application protecting the hostname, then adds an Allow
+    policy restricting access to the specified email addresses. Use the
+    Cloudflare dashboard to remove or modify policies — no delete tool is
+    provided here by design.
+
+    Args:
+        hostname: Hostname to protect (e.g. "app.pelorus.org").
+        name: Human-readable name for the application.
+        allowed_emails: Comma-separated email addresses to permit (e.g. "you@example.com").
+        session_duration: Session length (e.g. "24h", "7d"). Default "24h".
+    """
+    emails = [e.strip() for e in allowed_emails.split(",") if e.strip()]
+    if not emails:
+        return {"ok": False, "error": "At least one email address is required."}
+    try:
+        account_id, headers = _cf_access_cfg()
+        json_headers = {**headers, "Content-Type": "application/json"}
+
+        app_resp = _requests.post(
+            f"{_CF_API_BASE}/accounts/{account_id}/access/apps",
+            headers=json_headers,
+            json={
+                "name": name,
+                "domain": hostname,
+                "type": "self_hosted",
+                "session_duration": session_duration,
+            },
+            timeout=30,
+        )
+        app_resp.raise_for_status()
+        app_data = app_resp.json()
+        if not app_data.get("success"):
+            return {"ok": False, "error": str(app_data.get("errors"))}
+
+        app_id = app_data["result"]["id"]
+
+        pol_resp = _requests.post(
+            f"{_CF_API_BASE}/accounts/{account_id}/access/apps/{app_id}/policies",
+            headers=json_headers,
+            json={
+                "name": f"Allow {name}",
+                "decision": "allow",
+                "include": [{"email": {"email": e}} for e in emails],
+            },
+            timeout=30,
+        )
+        pol_resp.raise_for_status()
+        pol_data = pol_resp.json()
+        if not pol_data.get("success"):
+            return {"ok": False, "error": str(pol_data.get("errors"))}
+
+        return {
+            "ok": True,
+            "app_id": app_id,
+            "policy_id": pol_data["result"]["id"],
+            "hostname": hostname,
+            "name": name,
+            "allowed_emails": emails,
+            "session_duration": session_duration,
+        }
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except _requests.RequestException as exc:
