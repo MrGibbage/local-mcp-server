@@ -1661,17 +1661,22 @@ def bookstack_find_page(name: str, book_id: Optional[int] = None) -> dict:
     """
     try:
         base_url, headers = _bs_cfg()
-        params: dict[str, Any] = {"filter[name]": name, "count": 20}
+        # Fetch all pages in the book (or all pages) and filter client-side.
+        # The BookStack API's filter[name] does exact matching only and misses
+        # substring title matches, so we pull the full list and match locally.
+        params: dict[str, Any] = {"count": 500}
         if book_id is not None:
             params["filter[book_id]"] = book_id
         resp = _requests.get(f"{base_url}/api/pages", headers=headers, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
+        needle = name.lower()
         pages = [
             {"id": p.get("id"), "name": p.get("name"),
              "book_id": p.get("book_id"), "chapter_id": p.get("chapter_id"),
              "url": p.get("url")}
             for p in data.get("data", [])
+            if needle in (p.get("name") or "").lower()
         ]
         return {"pages": pages, "total": len(pages)}
     except ValueError as exc:
