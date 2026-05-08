@@ -205,12 +205,13 @@ def list_hosts() -> dict:
 
 
 @mcp.tool()
-def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200) -> dict:
+def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200,
+             cwd: Optional[str] = None) -> dict:
     """
     Run an arbitrary shell command on a named host via SSH.
 
     IMPORTANT: Before using ssh_exec for Docker, file, or system operations, first check
-    whether a dedicated MCP tool exists. This server has 44+ specialized tools (docker_ps,
+    whether a dedicated MCP tool exists. This server has 60+ specialized tools (docker_ps,
     docker_inspect, list_directory, stat_file, read_file, grep_file, etc.) that are deferred
     and only visible after a ToolSearch call. Example: ToolSearch(query="docker inspect stat")
     loads docker_inspect, stat_file, list_directory, etc. Use ssh_exec only when no dedicated
@@ -224,9 +225,12 @@ def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200) -> 
         command: Shell command to run.
         host: Named host from config (defaults to default_host).
         max_lines: Truncate stdout to this many lines (default 200). Use 0 for unlimited.
+        cwd: If provided, cd into this directory before running the command.
     """
     try:
         _check_allowlist(command)
+        if cwd:
+            command = f"cd {cwd} && {command}"
         result = _run(host, command)
         result["command"] = command
         if max_lines and result["stdout"]:
@@ -535,6 +539,92 @@ def docker_compose_down(path: str, host: Optional[str] = None) -> dict:
                 **({"error": result["stderr"]} if not ok else {})}
     except ValueError as exc:
         return {"ok": False, "path": path, "error": str(exc)}
+
+
+@mcp.tool()
+def docker_compose_logs(path: str, tail: int = 100, host: Optional[str] = None) -> dict:
+    """
+    Fetch recent logs from all services in a Docker Compose stack.
+
+    Args:
+        path: Absolute path to the directory containing compose.yml or docker-compose.yml.
+        tail: Number of recent log lines to return per service. Default 100.
+        host: Named host from config (defaults to default_host).
+    """
+    try:
+        result = _run(host, f"cd {path} && docker compose logs --tail={tail} 2>&1")
+        ok = result["exit_code"] == 0
+        lines = result["stdout"].splitlines()
+        return {"ok": ok, "host": result["host"], "path": path,
+                "stdout": "\n".join(lines[-500:]) if lines else "",
+                **({"error": result["stderr"]} if not ok else {})}
+    except ValueError as exc:
+        return {"ok": False, "path": path, "error": str(exc)}
+
+
+@mcp.tool()
+def docker_network_list(host: Optional[str] = None) -> dict:
+    """
+    List Docker networks on a host.
+
+    Returns a list of networks with ID, name, driver, and scope.
+    """
+    fmt = '{"ID":"{{.ID}}","Name":"{{.Name}}","Driver":"{{.Driver}}","Scope":"{{.Scope}}"}'
+    try:
+        result = _run(host, f"docker network ls --format '{fmt}'")
+        if result["exit_code"] != 0:
+            return {"ok": False, "error": result["stderr"]}
+        networks = []
+        for line in result["stdout"].splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    networks.append(json.loads(line))
+                except json.JSONDecodeError:
+                    networks.append({"raw": line})
+        return {"ok": True, "host": result["host"], "networks": networks, "count": len(networks)}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def http_get(url: str, expected_status: Optional[int] = None, host: Optional[str] = None) -> dict:
+    """
+    Make an HTTP GET request and return the status code and response body.
+
+    By default the request is made from the MCP server itself — useful for
+    reaching local-network services (e.g. Loki, Grafana, Prometheus).
+    If host is specified, the request is made from that host via SSH using curl.
+
+    Args:
+        url: URL to fetch.
+        expected_status: If provided, ok=False when the response status doesn't match.
+        host: Named host from config. If specified, curl runs on that host via SSH.
+    """
+    try:
+        if host:
+            result = _run(host, f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 10 {url!r}")
+            if result["exit_code"] != 0:
+                return {"ok": False, "url": url, "host": result["host"],
+                        "error": result["stderr"] or result["stdout"]}
+            status_code = int(result["stdout"].strip())
+            matched = expected_status is None or status_code == expected_status
+            return {"ok": matched, "url": url, "host": result["host"],
+                    "status_code": status_code,
+                    **({"expected_status": expected_status,
+                        "error": f"Expected {expected_status}, got {status_code}"} if not matched else {})}
+        else:
+            resp = _requests.get(url, timeout=10, verify=False)
+            status_code = resp.status_code
+            matched = expected_status is None or status_code == expected_status
+            return {"ok": matched, "url": url, "status_code": status_code,
+                    "body": resp.text[:2000],
+                    **({"expected_status": expected_status,
+                        "error": f"Expected {expected_status}, got {status_code}"} if not matched else {})}
+    except ValueError as exc:
+        return {"ok": False, "url": url, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "url": url, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -1558,6 +1648,76 @@ def bookstack_search(query: str, count: int = 10) -> dict:
 
 
 @mcp.tool()
+def bookstack_find_page(name: str, book_id: Optional[int] = None) -> dict:
+    """
+    Find BookStack pages by title.
+
+    Returns a list of matching pages with id, name, book_id, chapter_id, and url.
+    Preferred over memorized IDs — titles remain stable across BookStack reinstalls.
+
+    Args:
+        name: Page title to search for (partial match, case-insensitive).
+        book_id: Optional book ID to restrict results to a specific book.
+    """
+    try:
+        base_url, headers = _bs_cfg()
+        params: dict[str, Any] = {"filter[name]": name, "count": 20}
+        if book_id is not None:
+            params["filter[book_id]"] = book_id
+        resp = _requests.get(f"{base_url}/api/pages", headers=headers, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        pages = [
+            {"id": p.get("id"), "name": p.get("name"),
+             "book_id": p.get("book_id"), "chapter_id": p.get("chapter_id"),
+             "url": p.get("url")}
+            for p in data.get("data", [])
+        ]
+        return {"pages": pages, "total": len(pages)}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def bookstack_list_pages(book_id: Optional[int] = None, chapter_id: Optional[int] = None) -> dict:
+    """
+    List all pages in a book or chapter.
+
+    Returns id, name, book_id, chapter_id, and url for each page.
+    At least one of book_id or chapter_id must be provided.
+
+    Args:
+        book_id: List all pages in this book (across all chapters).
+        chapter_id: List pages in this specific chapter only.
+    """
+    if book_id is None and chapter_id is None:
+        return {"ok": False, "error": "Provide at least one of book_id or chapter_id."}
+    try:
+        base_url, headers = _bs_cfg()
+        params: dict[str, Any] = {"count": 100}
+        if chapter_id is not None:
+            params["filter[chapter_id]"] = chapter_id
+        elif book_id is not None:
+            params["filter[book_id]"] = book_id
+        resp = _requests.get(f"{base_url}/api/pages", headers=headers, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        pages = [
+            {"id": p.get("id"), "name": p.get("name"),
+             "book_id": p.get("book_id"), "chapter_id": p.get("chapter_id"),
+             "url": p.get("url")}
+            for p in data.get("data", [])
+        ]
+        return {"pages": pages, "total": len(pages)}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 def bookstack_read_page(page_id: int) -> dict:
     """
     Read a BookStack page by ID.
@@ -2267,6 +2427,83 @@ def bookstack_move_chapter(chapter_id: int, book_id: int) -> dict:
             "name": chapter.get("name"),
             "book_id": chapter.get("book_id"),
         }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Tools — Loki
+# ---------------------------------------------------------------------------
+
+
+def _loki_cfg() -> str:
+    """Return Loki base URL from config."""
+    url = CONFIG.get("loki", {}).get("url", "").rstrip("/")
+    if not url:
+        raise ValueError("loki config missing — set loki.url in config.yaml")
+    return url
+
+
+@mcp.tool()
+def loki_query(
+    since: str = "1h",
+    limit: int = 50,
+    container: Optional[str] = None,
+    query: Optional[str] = None,
+) -> dict:
+    """
+    Query Loki for logs using LogQL.
+
+    Provide either container (simple label filter) or a raw LogQL query string.
+    Results are returned newest-first.
+
+    Args:
+        since: How far back to query. Examples: "15m", "1h", "6h", "24h". Default "1h".
+        limit: Maximum log lines to return. Default 50.
+        container: Container name shorthand — expands to {container_name="<value>"}.
+        query: Raw LogQL query. Overrides container if both provided.
+               Example: '{compose_project=~".+"} |= "error"'
+    """
+    try:
+        base_url = _loki_cfg()
+
+        if query:
+            logql = query
+        elif container:
+            logql = f'{{container_name="{container}"}}'
+        else:
+            return {"ok": False, "error": "Provide either container or query."}
+
+        unit = since[-1]
+        try:
+            value = int(since[:-1])
+        except ValueError:
+            return {"ok": False, "error": f"Invalid since value '{since}'. Examples: 15m, 1h, 6h."}
+        multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+        if unit not in multipliers:
+            return {"ok": False, "error": f"Invalid since unit '{unit}'. Use s, m, h, or d."}
+        duration_ns = value * multipliers[unit] * 1_000_000_000
+
+        now_ns = int(time.time() * 1e9)
+        resp = _requests.get(
+            f"{base_url}/loki/api/v1/query_range",
+            params={"query": logql, "start": str(now_ns - duration_ns),
+                    "end": str(now_ns), "limit": limit, "direction": "backward"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        lines = []
+        for stream in data.get("data", {}).get("result", []):
+            for ts, line in stream.get("values", []):
+                lines.append({"ts": ts, "line": line})
+        lines.sort(key=lambda x: x["ts"], reverse=True)
+
+        return {"ok": True, "query": logql, "since": since,
+                "count": len(lines), "lines": lines[:limit]}
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except _requests.RequestException as exc:
