@@ -8,8 +8,10 @@ Connects to remote hosts via SSH using paramiko.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re as _re
+import shlex
 import stat as _stat
 import sys
 import time
@@ -51,6 +53,46 @@ DEFAULT_HOST: str | None = CONFIG.get("default_host")
 ALLOWLIST: list[str] | None = CONFIG.get("ssh_command_allowlist")  # None = unrestricted
 
 # ---------------------------------------------------------------------------
+# Logging — JSON lines for Loki/Promtail
+# ---------------------------------------------------------------------------
+
+_LOG_RECORD_ATTRS = frozenset({
+    "args", "asctime", "created", "exc_info", "exc_text", "filename",
+    "funcName", "levelname", "levelno", "lineno", "message", "module",
+    "msecs", "msg", "name", "pathname", "process", "processName",
+    "relativeCreated", "stack_info", "taskName", "thread", "threadName",
+})
+
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        record.message = record.getMessage()
+        obj: dict[str, Any] = {
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname.lower(),
+            "msg": record.message,
+        }
+        for key, val in record.__dict__.items():
+            if key not in _LOG_RECORD_ATTRS:
+                obj[key] = val
+        if record.exc_info:
+            obj["exc"] = self.formatException(record.exc_info)
+        return json.dumps(obj, default=str)
+
+
+def _setup_logging() -> logging.Logger:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_JsonFormatter())
+    logger = logging.getLogger("homelab_mcp")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    logger.propagate = False
+    return logger
+
+
+log = _setup_logging()
+
+# ---------------------------------------------------------------------------
 # FastMCP initialisation
 # ---------------------------------------------------------------------------
 
@@ -87,8 +129,13 @@ def _check_allowlist(command: str) -> None:
         )
 
 
-def _ssh_exec(host_cfg: dict, command: str) -> dict[str, Any]:
-    """Open a fresh SSH connection, run command, return stdout/stderr/exit_code."""
+def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60) -> dict[str, Any]:
+    """Open a fresh SSH connection, run command, return stdout/stderr/exit_code.
+
+    Wraps the remote command in `timeout --kill-after=5 <N>` so the remote
+    process tree is killed if it runs too long, preventing runaway processes
+    from blocking the SSH session pool after the MCP call returns.
+    """
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
@@ -105,23 +152,51 @@ def _ssh_exec(host_cfg: dict, command: str) -> dict[str, Any]:
             connect_kwargs["port"] = int(port)
 
         client.connect(**connect_kwargs)
-        _, stdout, stderr = client.exec_command(command, timeout=120)
+        # Wrap with remote timeout so the process tree is killed server-side.
+        # The paramiko channel timeout is set slightly higher so recv_exit_status
+        # sees the normal timeout exit rather than raising a socket timeout.
+        wrapped = f"timeout --kill-after=5 {timeout} bash -c {shlex.quote(command)}"
+        t0 = time.monotonic()
+        _, stdout, stderr = client.exec_command(wrapped, timeout=timeout + 15)
         exit_code = stdout.channel.recv_exit_status()
-        return {
-            "stdout": stdout.read().decode("utf-8", errors="replace").strip(),
-            "stderr": stderr.read().decode("utf-8", errors="replace").strip(),
-            "exit_code": exit_code,
-        }
+        duration = round(time.monotonic() - t0, 2)
+        out = stdout.read().decode("utf-8", errors="replace").strip()
+        err = stderr.read().decode("utf-8", errors="replace").strip()
+        result: dict[str, Any] = {"stdout": out, "stderr": err, "exit_code": exit_code}
+        timed_out = exit_code in (124, 137)
+        if exit_code == 124:
+            result["error"] = f"Command timed out after {timeout}s and was terminated."
+        elif exit_code == 137:
+            result["error"] = f"Command was force-killed after {timeout}s (SIGKILL)."
+        log.log(
+            logging.WARNING if timed_out else logging.INFO,
+            "ssh_exec timed out" if timed_out else "ssh_exec complete",
+            extra={
+                "event": "ssh_exec",
+                "host": host_cfg.get("hostname"),
+                "command_preview": command[:200],
+                "duration_s": duration,
+                "exit_code": exit_code,
+                "timed_out": timed_out,
+            },
+        )
+        return result
     except Exception as exc:  # noqa: BLE001
+        log.error("ssh_exec error", extra={
+            "event": "ssh_exec",
+            "host": host_cfg.get("hostname"),
+            "command_preview": command[:200],
+            "error": str(exc),
+        })
         return {"stdout": "", "stderr": str(exc), "exit_code": -1}
     finally:
         client.close()
 
 
-def _run(host: str | None, command: str) -> dict[str, Any]:
+def _run(host: str | None, command: str, timeout: int = 60) -> dict[str, Any]:
     """Resolve host, run command, return result dict."""
     host_name, host_cfg = _resolve_host(host)
-    result = _ssh_exec(host_cfg, command)
+    result = _ssh_exec(host_cfg, command, timeout=timeout)
     result["host"] = host_name
     return result
 
@@ -207,7 +282,7 @@ def list_hosts() -> dict:
 
 @mcp.tool()
 def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200,
-             cwd: Optional[str] = None) -> dict:
+             cwd: Optional[str] = None, timeout: int = 60) -> dict:
     """
     Run an arbitrary shell command on a named host via SSH.
 
@@ -218,7 +293,12 @@ def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200,
     loads docker_inspect, stat_file, list_directory, etc. Use ssh_exec only when no dedicated
     MCP tool covers your specific need.
 
-    Returns stdout, stderr, exit_code, host, and command.
+    Returns stdout, stderr, exit_code, host, and command. The remote command is
+    wrapped in `timeout --kill-after=5 <timeout>` so runaway processes are
+    guaranteed to be killed server-side when the deadline is reached. If the
+    command is killed by timeout, exit_code will be 124 (SIGTERM) or 137 (SIGKILL)
+    and an "error" key will be present in the result.
+
     If ssh_command_allowlist is set in config.yaml, only listed base commands
     are permitted.
 
@@ -227,12 +307,15 @@ def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200,
         host: Named host from config (defaults to default_host).
         max_lines: Truncate stdout to this many lines (default 200). Use 0 for unlimited.
         cwd: If provided, cd into this directory before running the command.
+        timeout: Remote execution timeout in seconds (default 60). The remote
+            process tree is killed after this many seconds. Use a larger value
+            for known slow operations (e.g. package installs). Max recommended: 90.
     """
     try:
         _check_allowlist(command)
         if cwd:
             command = f"cd {cwd} && {command}"
-        result = _run(host, command)
+        result = _run(host, command, timeout=timeout)
         result["command"] = command
         if max_lines and result["stdout"]:
             lines = result["stdout"].splitlines()
@@ -801,7 +884,7 @@ def write_file(path: str, content: str, host: Optional[str] = None,
             if port != 22:
                 connect_kwargs["port"] = int(port)
             client.connect(**connect_kwargs)
-            stdin, stdout, stderr = client.exec_command(f"sudo tee {path} > /dev/null")
+            stdin, stdout, stderr = client.exec_command(f"sudo tee {path} > /dev/null", timeout=30)
             stdin.write(content.encode("utf-8"))
             stdin.channel.shutdown_write()
             exit_code = stdout.channel.recv_exit_status()
@@ -893,7 +976,7 @@ def patch_file(
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
             client.connect(**connect_kwargs)
-            _, stdout_r, stderr_r = client.exec_command(f"sudo cat {path}")
+            _, stdout_r, stderr_r = client.exec_command(f"sudo cat {path}", timeout=30)
             content = stdout_r.read().decode("utf-8", errors="replace")
             if stdout_r.channel.recv_exit_status() != 0:
                 err = stderr_r.read().decode("utf-8", errors="replace").strip()
@@ -914,7 +997,7 @@ def patch_file(
                     "path": path,
                 }
             new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
-            stdin_w, stdout_w, stderr_w = client.exec_command(f"sudo tee {path} > /dev/null")
+            stdin_w, stdout_w, stderr_w = client.exec_command(f"sudo tee {path} > /dev/null", timeout=30)
             stdin_w.write(new_content.encode("utf-8"))
             stdin_w.channel.shutdown_write()
             exit_code = stdout_w.channel.recv_exit_status()
@@ -2630,19 +2713,39 @@ def caddy_add_route(
     try:
         http_tls, to_domain, to_port = _caddy_parse_destination(to_destination)
 
-        rev = _opnsense_api("POST", "/caddy/ReverseProxy/addReverseProxy", json={
-            "reverseproxy": {
-                "FromDomain": from_domain,
+        # OPNsense os-caddy model key is "reverse" (not "reverseproxy")
+        reverse_payload: dict = {
+            "reverse": {
                 "enabled": "1",
+                "FromDomain": from_domain,
+                "FromPort": "",
+                "accesslist": "",
                 "description": description or "",
                 "DnsChallenge": "1",
+                "DnsChallengeOverrideDomain": "",
+                "CustomCertificate": "",
+                "AccessLog": "0",
+                "DynDns": "0",
+                "AcmePassthrough": "",
+                "DisableTls": "0",
+                "ClientAuthMode": "",
+                "ClientAuthTrustPool": "",
             }
-        })
+        }
+        rev = _opnsense_api("POST", "/caddy/ReverseProxy/addReverseProxy", json=reverse_payload)
         if rev.get("result") not in ("saved", "ok"):
-            return {"ok": False, "error": f"Failed to create reverse entry: {rev}"}
+            return {
+                "ok": False,
+                "error": (
+                    "OPNsense rejected reverse proxy creation — "
+                    f"endpoint=POST /caddy/ReverseProxy/addReverseProxy, "
+                    f"fields={list(reverse_payload['reverse'].keys())}, "
+                    f"response={rev}"
+                ),
+            }
         reverse_uuid = rev.get("uuid", "")
 
-        han = _opnsense_api("POST", "/caddy/ReverseProxy/addHandle", json={
+        handle_payload: dict = {
             "handle": {
                 "reverse": reverse_uuid,
                 "enabled": "1",
@@ -2653,11 +2756,20 @@ def caddy_add_route(
                 "HttpTls": http_tls,
                 "description": description or "",
             }
-        })
+        }
+        han = _opnsense_api("POST", "/caddy/ReverseProxy/addHandle", json=handle_payload)
         if han.get("result") not in ("saved", "ok"):
             # Roll back the reverse entry we just created
             _opnsense_api("POST", f"/caddy/ReverseProxy/delReverseProxy/{reverse_uuid}")
-            return {"ok": False, "error": f"Failed to create handle entry: {han}"}
+            return {
+                "ok": False,
+                "error": (
+                    "OPNsense rejected handle creation (reverse entry rolled back) — "
+                    f"endpoint=POST /caddy/ReverseProxy/addHandle, "
+                    f"fields={list(handle_payload['handle'].keys())}, "
+                    f"response={han}"
+                ),
+            }
 
         _opnsense_api("POST", "/caddy/service/reconfigure")
         return {
@@ -3069,7 +3181,7 @@ if __name__ == "__main__":
 
     class StripAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            print(f"MIDDLEWARE: {request.method} {request.url.path}", flush=True)
+            log.debug("http request", extra={"method": request.method, "path": request.url.path})
             scope = request.scope
             scope["headers"] = [
                 (k, v) for k, v in scope.get("headers", [])
@@ -3097,7 +3209,7 @@ if __name__ == "__main__":
 
     async def register(request: Request) -> JSONResponse:
         body = await request.json()
-        print(f"REGISTER REQUEST: {body}", flush=True)
+        log.debug("oauth register", extra={"client_name": body.get("client_name")})
         return JSONResponse({
             "client_id": "anonymous",
             "client_id_issued_at": 1700000000,
@@ -3113,7 +3225,7 @@ if __name__ == "__main__":
     async def authorize(request: Request) -> RedirectResponse:
         redirect_uri = request.query_params.get("redirect_uri", "")
         state = request.query_params.get("state", "")
-        print(f"AUTHORIZE REQUEST: {dict(request.query_params)}", flush=True)
+        log.debug("oauth authorize", extra={"redirect_uri": redirect_uri, "state": state})
         return RedirectResponse(
             url=f"{redirect_uri}?code=homelab-auth-code&state={state}",
             status_code=302
@@ -3121,7 +3233,7 @@ if __name__ == "__main__":
 
     async def token(request: Request) -> JSONResponse:
         form = await request.form()
-        print(f"TOKEN REQUEST: {dict(form)}", flush=True)
+        log.debug("oauth token exchange")
         return JSONResponse({
             "access_token": "homelab-anonymous-token",
             "token_type": "bearer",
@@ -3152,5 +3264,5 @@ if __name__ == "__main__":
     app.add_middleware(StripAuthMiddleware)
     app.add_middleware(BearerAuthMiddleware)
 
-    print(f"Starting Homelab MCP server on {HOST}:{PORT} (Streamable HTTP transport)", flush=True)
+    log.info("server starting", extra={"host": HOST, "port": PORT, "transport": "streamable_http"})
     uvicorn.run(app, host=HOST, port=PORT)
