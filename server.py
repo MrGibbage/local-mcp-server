@@ -3164,34 +3164,14 @@ if __name__ == "__main__":
     import uvicorn
     from starlette.applications import Starlette
     from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.requests import Request
-    from starlette.responses import JSONResponse, RedirectResponse
-    from starlette.routing import Mount, Route
-
-    BASE_URL = os.environ.get("MCP_BASE_URL", "http://192.168.0.231:8090")
+    from starlette.responses import JSONResponse
+    from starlette.routing import Mount
 
     class BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
             path = request.url.path
-            if path in (
-                "/.well-known/oauth-protected-resource/mcp",
-                "/.well-known/oauth-protected-resource",
-            ):
-                return JSONResponse({
-                    "resource": BASE_URL,
-                    "authorization_servers": [BASE_URL],
-                })
-            if path == "/.well-known/oauth-authorization-server":
-                return JSONResponse({
-                    "issuer": BASE_URL,
-                    "authorization_endpoint": f"{BASE_URL}/authorize",
-                    "token_endpoint": f"{BASE_URL}/token",
-                    "registration_endpoint": f"{BASE_URL}/register",
-                    "response_types_supported": ["code"],
-                    "grant_types_supported": ["authorization_code"],
-                    "token_endpoint_auth_methods_supported": ["none"],
-                    "code_challenge_methods_supported": ["S256"],
-                })
+            if path.startswith("/.well-known/oauth-"):
+                return JSONResponse({"error": "Not Found"}, status_code=404)
 
             token = os.environ.get("MCP_AUTH_TOKEN")
             if token:
@@ -3210,65 +3190,7 @@ if __name__ == "__main__":
             ]
             return await call_next(request)
 
-    async def oauth_protected_resource(_request: Request) -> JSONResponse:
-        return JSONResponse({
-            "resource": BASE_URL,
-            "authorization_servers": [BASE_URL],
-        })
-
-    async def oauth_authorization_server(_request: Request) -> JSONResponse:
-        return JSONResponse({
-            "issuer": BASE_URL,
-            "authorization_endpoint": f"{BASE_URL}/authorize",
-            "token_endpoint": f"{BASE_URL}/token",
-            "registration_endpoint": f"{BASE_URL}/register",
-            "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code"],
-            "token_endpoint_auth_methods_supported": ["none"],
-            "code_challenge_methods_supported": ["S256"],
-        })
-
-    async def register(request: Request) -> JSONResponse:
-        body = await request.json()
-        log.debug("oauth register", extra={"client_name": body.get("client_name")})
-        return JSONResponse({
-            "client_id": "anonymous",
-            "client_id_issued_at": 1700000000,
-            "client_secret": "unused",
-            "client_secret_expires_at": 0,
-            "token_endpoint_auth_method": "none",
-            "grant_types": ["authorization_code", "refresh_token"],
-            "response_types": ["code"],
-            "redirect_uris": body.get("redirect_uris", []),
-            "client_name": body.get("client_name", "Claude"),
-        })
-
-    async def authorize(request: Request) -> RedirectResponse:
-        redirect_uri = request.query_params.get("redirect_uri", "")
-        state = request.query_params.get("state", "")
-        log.debug("oauth authorize", extra={"redirect_uri": redirect_uri, "state": state})
-        return RedirectResponse(
-            url=f"{redirect_uri}?code=homelab-auth-code&state={state}",
-            status_code=302
-        )
-
-    async def token(request: Request) -> JSONResponse:
-        form = await request.form()
-        log.debug("oauth token exchange")
-        return JSONResponse({
-            "access_token": "homelab-anonymous-token",
-            "token_type": "bearer",
-            "expires_in": 86400,
-        })
-
-    wellknown_routes = [
-        Route("/.well-known/oauth-protected-resource/mcp", oauth_protected_resource),
-        Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
-        Route("/.well-known/oauth-authorization-server", oauth_authorization_server),
-        Route("/register", register, methods=["POST"]),
-        Route("/authorize", authorize, methods=["GET"]),
-        Route("/token", token, methods=["POST"]),
-    ]
+    # Do not advertise OAuth. Claude Code should use the configured bearer header.
     from contextlib import asynccontextmanager
 
     mcp_app = mcp.streamable_http_app()
@@ -3279,7 +3201,7 @@ if __name__ == "__main__":
             yield
 
     app = Starlette(
-        routes=wellknown_routes + [Mount("/", app=mcp_app)],
+        routes=[Mount("/", app=mcp_app)],
         lifespan=lifespan
     )
     app.add_middleware(StripAuthMiddleware)
