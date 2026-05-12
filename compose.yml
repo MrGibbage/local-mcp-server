@@ -20,5 +20,4 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - CONFIG_PATH=/app/config.yaml
-      - MCP_BASE_URL=http://192.168.0.231:8090
       - MCP_AUTH_TOKEN=f0324a9ef85f8e6b798f49ed8d86438b8239e4a653bca2632902141a16f9d0dd
