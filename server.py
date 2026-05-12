@@ -3168,12 +3168,33 @@ if __name__ == "__main__":
     from starlette.responses import JSONResponse, RedirectResponse
     from starlette.routing import Mount, Route
 
-    BASE_URL = "https://homelab-mcp.pelorus.org"
+    BASE_URL = os.environ.get("MCP_BASE_URL", "http://192.168.0.231:8090")
 
     class BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
+            path = request.url.path
+            if path in (
+                "/.well-known/oauth-protected-resource/mcp",
+                "/.well-known/oauth-protected-resource",
+            ):
+                return JSONResponse({
+                    "resource": BASE_URL,
+                    "authorization_servers": [BASE_URL],
+                })
+            if path == "/.well-known/oauth-authorization-server":
+                return JSONResponse({
+                    "issuer": BASE_URL,
+                    "authorization_endpoint": f"{BASE_URL}/authorize",
+                    "token_endpoint": f"{BASE_URL}/token",
+                    "registration_endpoint": f"{BASE_URL}/register",
+                    "response_types_supported": ["code"],
+                    "grant_types_supported": ["authorization_code"],
+                    "token_endpoint_auth_methods_supported": ["none"],
+                    "code_challenge_methods_supported": ["S256"],
+                })
+
             token = os.environ.get("MCP_AUTH_TOKEN")
-            if token and not request.url.path.startswith("/.well-known/"):
+            if token:
                 auth = request.headers.get("authorization", "")
                 if auth != f"Bearer {token}":
                     return JSONResponse({"error": "Unauthorized"}, status_code=401)
