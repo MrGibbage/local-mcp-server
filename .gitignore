@@ -27,6 +27,8 @@ certs/
 
 # Debug/scratch files
 mcp_output.txt
+test_caddy.py
+*.backup.*
 
 # Editor
 .vscode/
