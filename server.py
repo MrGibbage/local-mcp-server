@@ -221,7 +221,13 @@ def _resolve_proxmox_node(host: str) -> dict:
 def _proxmox_api(node_cfg: dict, method: str, path: str, **kwargs) -> dict:
     """Make an authenticated Proxmox API request. Returns parsed JSON response."""
     base_url = f"https://{node_cfg['host']}:8006/api2/json"
-    headers = {"Authorization": f"PVEAPIToken={node_cfg['api_token']}"}
+    env_key = f"{node_cfg['name'].upper()}_API_TOKEN"  # e.g. PROXMOX1_API_TOKEN
+    api_token = os.environ.get(env_key, node_cfg.get("api_token", ""))
+    if not api_token:
+        raise ValueError(
+            f"Proxmox token missing — set {env_key} in .env"
+        )
+    headers = {"Authorization": f"PVEAPIToken={api_token}"}
     resp = _requests.request(
         method,
         f"{base_url}{path}",
@@ -468,8 +474,12 @@ def docker_inspect(container: str, format: Optional[str] = None, host: Optional[
         if not format:
             try:
                 data = json.loads(output)
-                return {"ok": True, "container": container, "host": result["host"],
-                        "data": data[0] if isinstance(data, list) and len(data) == 1 else data}
+                item = data[0] if isinstance(data, list) and len(data) == 1 else data
+                # Redact env vars from the MCP server's own container — they contain secrets.
+                if isinstance(item, dict) and item.get("Name", "").lstrip("/") == "homelab-mcp":
+                    item.get("Config", {}).pop("Env", None)
+                    item["_note"] = "Env redacted for homelab-mcp (contains secrets)"
+                return {"ok": True, "container": container, "host": result["host"], "data": item}
             except json.JSONDecodeError:
                 pass
         return {"ok": True, "container": container, "host": result["host"], "output": output}
@@ -1680,11 +1690,12 @@ def _bs_cfg() -> tuple[str, dict]:
     """Return (base_url, headers) for BookStack API calls."""
     cfg = CONFIG.get("bookstack", {})
     base_url = cfg.get("url", "").rstrip("/")
-    token_id = cfg.get("token_id", "")
-    token_secret = cfg.get("token_secret", "")
+    token_id = os.environ.get("BOOKSTACK_TOKEN_ID", "")
+    token_secret = os.environ.get("BOOKSTACK_TOKEN_SECRET", "")
     if not (base_url and token_id and token_secret):
         raise ValueError(
-            "bookstack config missing — set bookstack.url, token_id, token_secret in config.yaml"
+            "bookstack config missing — set bookstack.url in config.yaml and "
+            "BOOKSTACK_TOKEN_ID / BOOKSTACK_TOKEN_SECRET in .env"
         )
     headers = {
         "Authorization": f"Token {token_id}:{token_secret}",
@@ -2610,11 +2621,12 @@ def _opnsense_api(method: str, path: str, **kwargs) -> dict:
     """Make an authenticated OPNsense API request. Returns parsed JSON."""
     cfg = CONFIG.get("opnsense", {})
     base_url = cfg.get("url", "").rstrip("/")
-    api_key = cfg.get("api_key", "")
-    api_secret = cfg.get("api_secret", "")
+    api_key = os.environ.get("OPNSENSE_API_KEY", "")
+    api_secret = os.environ.get("OPNSENSE_API_SECRET", "")
     if not (base_url and api_key and api_secret):
         raise ValueError(
-            "opnsense config missing — set opnsense.url, api_key, api_secret in config.yaml"
+            "opnsense config missing — set opnsense.url in config.yaml and "
+            "OPNSENSE_API_KEY / OPNSENSE_API_SECRET in .env"
         )
     resp = _requests.request(
         method,
@@ -2863,11 +2875,11 @@ def _cf_tunnel_cfg() -> tuple[str, str, dict]:
     cfg = CONFIG.get("cloudflare", {})
     account_id = cfg.get("account_id", "")
     tunnel_id = cfg.get("tunnel_id", "")
-    token = cfg.get("tunnel_api_token", "")
+    token = os.environ.get("CLOUDFLARE_TUNNEL_API_TOKEN", "")
     if not (account_id and tunnel_id and token):
         raise ValueError(
-            "cloudflare tunnel config missing — set cloudflare.account_id, "
-            "tunnel_id, tunnel_api_token in config.yaml"
+            "cloudflare tunnel config missing — set cloudflare.account_id and tunnel_id "
+            "in config.yaml and CLOUDFLARE_TUNNEL_API_TOKEN in .env"
         )
     return account_id, tunnel_id, {"Authorization": f"Bearer {token}"}
 
@@ -2876,11 +2888,11 @@ def _cf_access_cfg() -> tuple[str, dict]:
     """Return (account_id, headers) for Cloudflare Access API calls."""
     cfg = CONFIG.get("cloudflare", {})
     account_id = cfg.get("account_id", "")
-    token = cfg.get("access_api_token", "")
+    token = os.environ.get("CLOUDFLARE_ACCESS_API_TOKEN", "")
     if not (account_id and token):
         raise ValueError(
-            "cloudflare access config missing — set cloudflare.account_id, "
-            "access_api_token in config.yaml"
+            "cloudflare access config missing — set cloudflare.account_id in config.yaml "
+            "and CLOUDFLARE_ACCESS_API_TOKEN in .env"
         )
     return account_id, {"Authorization": f"Bearer {token}"}
 
