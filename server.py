@@ -1259,6 +1259,58 @@ def list_directory(path: str, host: Optional[str] = None, all: bool = True,
 
 
 @mcp.tool()
+def rclone_ls(remote_path: str, host: Optional[str] = None,
+              max_depth: int = 1, recursive: bool = False) -> dict:
+    """
+    List files on an rclone remote, returning structured size+path entries.
+
+    Runs `rclone ls` on the target host via SSH. Output is parsed into a list
+    of {"size_bytes": int, "path": str} entries.
+
+    Args:
+        remote_path: rclone remote path, e.g. "b2:my-backups/subdir/".
+        host: Named host from config (defaults to default_host).
+        max_depth: Passed as --max-depth (default 1). Ignored when recursive=True.
+        recursive: If True, omit --max-depth and list all files recursively.
+    """
+    try:
+        depth_flag = "" if recursive else f"--max-depth {max_depth}"
+        cmd = f"rclone ls {depth_flag} {shlex.quote(remote_path)}".strip()
+        result = _run(host, cmd, timeout=60)
+        host_name = result["host"]
+
+        if result["exit_code"] != 0:
+            stderr = result["stderr"] or result["stdout"]
+            if "not found" in stderr.lower() or "command not found" in stderr.lower():
+                error = "rclone not found on host"
+            else:
+                error = stderr or f"rclone exited with code {result['exit_code']}"
+            log.warning("rclone_ls failed", extra={
+                "event": "rclone_ls", "host": host_name,
+                "remote_path": remote_path, "error": error,
+            })
+            return {"ok": False, "remote_path": remote_path, "host": host_name, "error": error}
+
+        entries = []
+        for line in result["stdout"].splitlines():
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            size_str, path = parts
+            if size_str.isdigit():
+                entries.append({"size_bytes": int(size_str), "path": path})
+
+        log.info("rclone_ls complete", extra={
+            "event": "rclone_ls", "host": host_name,
+            "remote_path": remote_path, "count": len(entries),
+        })
+        return {"ok": True, "remote_path": remote_path, "host": host_name,
+                "entries": entries, "count": len(entries)}
+    except ValueError as exc:
+        return {"ok": False, "remote_path": remote_path, "error": str(exc)}
+
+
+@mcp.tool()
 def make_directory(path: str, host: Optional[str] = None, use_sudo: bool = False) -> dict:
     """
     Create a directory (and any missing parents) on a remote host.
