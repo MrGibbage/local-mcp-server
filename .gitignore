@@ -7,6 +7,7 @@ keys/
 # Environment files
 .env
 *.env
+.env.*
 
 # Python
 __pycache__/

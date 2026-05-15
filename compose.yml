@@ -22,4 +22,22 @@ services:
       - .env
     environment:
       - CONFIG_PATH=/app/config.yaml
-      - MCP_AUTH_TOKEN=f0324a9ef85f8e6b798f49ed8d86438b8239e4a653bca2632902141a16f9d0dd
+
+  homelab-mcp-ro:
+    build: .
+    container_name: homelab-mcp-ro
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+      - "diun.enable=false"
+    ports:
+      - "8091:8080"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./keys:/keys:ro
+    env_file:
+      - .env
+      - .env.ccr
+    environment:
+      - CONFIG_PATH=/app/config.yaml
+      - "MCP_ENABLED_TOOLS=list_hosts,docker_ps,docker_stats,docker_logs,docker_inspect,docker_network_list,docker_capabilities,docker_restart,loki_query,disk_usage,memory_usage,systemctl_status,systemctl_list,proxmox_vm_list,proxmox_task_status,proxmox_snapshot_list,proxmox_storage_info,read_file,grep_file,tail_file,list_directory,stat_file,rclone_ls,http_get,bookstack_search,bookstack_find_page,bookstack_list_pages,bookstack_read_page,bookstack_list_books,bookstack_get_book_contents,bookstack_get_page_history,bookstack_get_page_metadata,cloudflare_list_tunnel_routes,cloudflare_list_access_policies,caddy_list_routes,opnsense_list_dhcp_leases,validate_config"
