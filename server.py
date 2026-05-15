@@ -99,6 +99,23 @@ log = _setup_logging()
 mcp = FastMCP("Homelab MCP", host=HOST, port=PORT, auth=None)
 
 # ---------------------------------------------------------------------------
+# Tool registration filter — MCP_ENABLED_TOOLS
+# ---------------------------------------------------------------------------
+
+_raw_enabled = os.environ.get("MCP_ENABLED_TOOLS")
+_ENABLED_TOOLS: frozenset[str] | None = (
+    frozenset(t.strip() for t in _raw_enabled.split(",") if t.strip())
+    if _raw_enabled else None
+)
+
+
+def _tool(fn):
+    if _ENABLED_TOOLS is None or fn.__name__ in _ENABLED_TOOLS:
+        return mcp.tool()(fn)
+    return fn
+
+
+# ---------------------------------------------------------------------------
 # SSH helpers
 # ---------------------------------------------------------------------------
 
@@ -264,7 +281,7 @@ def _proxmox_wait_task(node_cfg: dict, upid: str, timeout: int = 60) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool
 def list_hosts() -> dict:
     """Return all configured hosts so the model knows what targets are available."""
     hosts = CONFIG.get("hosts", {})
@@ -286,7 +303,7 @@ def list_hosts() -> dict:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool
 def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200,
              cwd: Optional[str] = None, timeout: int = 60) -> dict:
     """
@@ -338,7 +355,7 @@ def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200,
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool
 def docker_ps(host: Optional[str] = None, filter: Optional[str] = None) -> dict:
     """
     List running Docker containers on a host.
@@ -368,7 +385,7 @@ def docker_ps(host: Optional[str] = None, filter: Optional[str] = None) -> dict:
         return {"error": str(exc), "exit_code": -1}
 
 
-@mcp.tool()
+@_tool
 def docker_logs(container: str, host: Optional[str] = None, tail: int = 100) -> dict:
     """
     Fetch recent logs from a Docker container.
@@ -385,7 +402,7 @@ def docker_logs(container: str, host: Optional[str] = None, tail: int = 100) -> 
         return {"stdout": "", "stderr": str(exc), "exit_code": -1}
 
 
-@mcp.tool()
+@_tool
 def docker_restart(container: str, host: Optional[str] = None) -> dict:
     """Restart a Docker container by name or ID."""
     try:
@@ -397,7 +414,7 @@ def docker_restart(container: str, host: Optional[str] = None) -> dict:
         return {"ok": False, "container": container, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def docker_stop(container: str, host: Optional[str] = None) -> dict:
     """Stop a running Docker container."""
     try:
@@ -409,7 +426,7 @@ def docker_stop(container: str, host: Optional[str] = None) -> dict:
         return {"ok": False, "container": container, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def docker_start(container: str, host: Optional[str] = None) -> dict:
     """Start a stopped Docker container."""
     try:
@@ -421,7 +438,7 @@ def docker_start(container: str, host: Optional[str] = None) -> dict:
         return {"ok": False, "container": container, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def docker_pull(image: str, host: Optional[str] = None) -> dict:
     """
     Pull a Docker image on a host.
@@ -448,7 +465,7 @@ def docker_pull(image: str, host: Optional[str] = None) -> dict:
         return {"ok": False, "image": image, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def docker_inspect(container: str, format: Optional[str] = None, host: Optional[str] = None) -> dict:
     """
     Inspect a Docker container's configuration and runtime state.
@@ -487,7 +504,7 @@ def docker_inspect(container: str, format: Optional[str] = None, host: Optional[
         return {"ok": False, "container": container, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def docker_exec(container: str, command: str, host: Optional[str] = None) -> dict:
     """
     Run a command inside a running Docker container.
@@ -511,7 +528,7 @@ def docker_exec(container: str, command: str, host: Optional[str] = None) -> dic
         return {"ok": False, "container": container, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def docker_capabilities(container: str, host: Optional[str] = None) -> dict:
     """
     Return decoded Linux capabilities for a running container.
@@ -567,7 +584,7 @@ def docker_capabilities(container: str, host: Optional[str] = None) -> dict:
         return {"ok": False, "container": container, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def docker_stats(container: str, host: Optional[str] = None) -> dict:
     """
     Get a one-shot resource usage snapshot for a Docker container.
@@ -595,7 +612,7 @@ def docker_stats(container: str, host: Optional[str] = None) -> dict:
         return {"ok": False, "container": container, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def docker_compose_up(path: str, host: Optional[str] = None) -> dict:
     """
     Run 'docker compose up -d' in the given directory on a host.
@@ -615,7 +632,7 @@ def docker_compose_up(path: str, host: Optional[str] = None) -> dict:
         return {"ok": False, "path": path, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def docker_compose_down(path: str, host: Optional[str] = None) -> dict:
     """
     Run 'docker compose down' in the given directory on a host.
@@ -635,7 +652,7 @@ def docker_compose_down(path: str, host: Optional[str] = None) -> dict:
         return {"ok": False, "path": path, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def docker_compose_logs(path: str, tail: int = 100, host: Optional[str] = None) -> dict:
     """
     Fetch recent logs from all services in a Docker Compose stack.
@@ -656,7 +673,7 @@ def docker_compose_logs(path: str, tail: int = 100, host: Optional[str] = None) 
         return {"ok": False, "path": path, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def docker_network_list(host: Optional[str] = None) -> dict:
     """
     List Docker networks on a host.
@@ -681,7 +698,7 @@ def docker_network_list(host: Optional[str] = None) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def http_get(url: str, expected_status: Optional[int] = None, host: Optional[str] = None) -> dict:
     """
     Make an HTTP GET request and return the status code and response body.
@@ -726,7 +743,7 @@ def http_get(url: str, expected_status: Optional[int] = None, host: Optional[str
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool
 def systemctl_status(service: str, host: Optional[str] = None) -> dict:
     """Return the systemctl status of a service on the named host."""
     try:
@@ -735,7 +752,7 @@ def systemctl_status(service: str, host: Optional[str] = None) -> dict:
         return {"stdout": "", "stderr": str(exc), "exit_code": -1}
 
 
-@mcp.tool()
+@_tool
 def systemctl_restart(service: str, host: Optional[str] = None) -> dict:
     """Restart a systemd service on the named host."""
     try:
@@ -747,7 +764,7 @@ def systemctl_restart(service: str, host: Optional[str] = None) -> dict:
         return {"ok": False, "service": service, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def systemctl_list(host: Optional[str] = None, state: Optional[str] = None) -> dict:
     """
     List systemd service units on a host, with optional state filter.
@@ -789,7 +806,7 @@ def systemctl_list(host: Optional[str] = None, state: Optional[str] = None) -> d
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool
 def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200,
               use_sudo: bool = False) -> dict:
     """
@@ -856,7 +873,7 @@ def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200,
         client.close()
 
 
-@mcp.tool()
+@_tool
 def write_file(path: str, content: str, host: Optional[str] = None,
                use_sudo: bool = False) -> dict:
     """
@@ -933,7 +950,7 @@ def write_file(path: str, content: str, host: Optional[str] = None,
         client.close()
 
 
-@mcp.tool()
+@_tool
 def patch_file(
     path: str,
     old_string: str,
@@ -1062,7 +1079,7 @@ def patch_file(
         client.close()
 
 
-@mcp.tool()
+@_tool
 def tail_file(path: str, lines: int = 50, host: Optional[str] = None) -> dict:
     """
     Return the last N lines of a file on a remote host.
@@ -1090,7 +1107,7 @@ def tail_file(path: str, lines: int = 50, host: Optional[str] = None) -> dict:
         return {"ok": False, "error": str(exc), "path": path}
 
 
-@mcp.tool()
+@_tool
 def grep_file(path: str, pattern: str, host: Optional[str] = None, context: int = 0) -> dict:
     """
     Search for a pattern in a remote file and return matching lines.
@@ -1123,7 +1140,7 @@ def grep_file(path: str, pattern: str, host: Optional[str] = None, context: int 
         return {"ok": False, "error": str(exc), "path": path}
 
 
-@mcp.tool()
+@_tool
 def stat_file(path: str, host: Optional[str] = None) -> dict:
     """
     Return metadata for a file or directory on a remote host without reading its content.
@@ -1193,7 +1210,7 @@ def stat_file(path: str, host: Optional[str] = None) -> dict:
         client.close()
 
 
-@mcp.tool()
+@_tool
 def list_directory(path: str, host: Optional[str] = None, all: bool = True,
                    use_sudo: bool = False) -> dict:
     """
@@ -1258,7 +1275,7 @@ def list_directory(path: str, host: Optional[str] = None, all: bool = True,
         return {"ok": False, "path": path, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def rclone_ls(remote_path: str, host: Optional[str] = None,
               max_depth: int = 1, recursive: bool = False) -> dict:
     """
@@ -1310,7 +1327,7 @@ def rclone_ls(remote_path: str, host: Optional[str] = None,
         return {"ok": False, "remote_path": remote_path, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def make_directory(path: str, host: Optional[str] = None, use_sudo: bool = False) -> dict:
     """
     Create a directory (and any missing parents) on a remote host.
@@ -1331,7 +1348,7 @@ def make_directory(path: str, host: Optional[str] = None, use_sudo: bool = False
         return {"ok": False, "path": path, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def backup_file(path: str, host: Optional[str] = None, use_sudo: bool = False) -> dict:
     """
     Create a timestamped backup of a file on a remote host before editing it.
@@ -1361,7 +1378,7 @@ def backup_file(path: str, host: Optional[str] = None, use_sudo: bool = False) -
         return {"ok": False, "path": path, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def validate_config(path: str, host: Optional[str] = None) -> dict:
     """
     Validate a YAML or JSON config file on a remote host without restarting any service.
@@ -1434,7 +1451,7 @@ def validate_config(path: str, host: Optional[str] = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool
 def disk_usage(host: Optional[str] = None) -> dict:
     """Return disk usage summary (df -h) for the named host."""
     try:
@@ -1443,7 +1460,7 @@ def disk_usage(host: Optional[str] = None) -> dict:
         return {"stdout": "", "stderr": str(exc), "exit_code": -1}
 
 
-@mcp.tool()
+@_tool
 def memory_usage(host: Optional[str] = None) -> dict:
     """Return memory usage summary (free -h) for the named host."""
     try:
@@ -1457,7 +1474,7 @@ def memory_usage(host: Optional[str] = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool
 def proxmox_vm_list(host: str) -> dict:
     """
     List all VMs and containers on a Proxmox node.
@@ -1509,7 +1526,7 @@ def proxmox_vm_list(host: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def proxmox_snapshot_list(host: str, vmid: int) -> dict:
     """
     List all snapshots for a Proxmox VM or container.
@@ -1554,7 +1571,7 @@ def proxmox_snapshot_list(host: str, vmid: int) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def proxmox_snapshot_create(host: str, vmid: int, snapname: str, description: str = "") -> dict:
     """
     Create a disk-only snapshot for a Proxmox VM or container.
@@ -1607,7 +1624,7 @@ def proxmox_snapshot_create(host: str, vmid: int, snapname: str, description: st
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def proxmox_snapshot_delete(host: str, vmid: int, snapname: str) -> dict:
     """
     Delete a snapshot from a Proxmox VM or container.
@@ -1652,7 +1669,7 @@ def proxmox_snapshot_delete(host: str, vmid: int, snapname: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def proxmox_task_status(host: str, upid: str) -> dict:
     """
     Poll the current status of a Proxmox task by its UPID.
@@ -1686,7 +1703,7 @@ def proxmox_task_status(host: str, upid: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def proxmox_storage_info(host: str) -> dict:
     """
     Return storage status for all active storage on a Proxmox node.
@@ -1756,7 +1773,7 @@ def _bs_cfg() -> tuple[str, dict]:
     return base_url, headers
 
 
-@mcp.tool()
+@_tool
 def bookstack_search(query: str, count: int = 10) -> dict:
     """
     Search BookStack pages, chapters, and books.
@@ -1794,7 +1811,7 @@ def bookstack_search(query: str, count: int = 10) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_find_page(name: str, book_id: Optional[int] = None) -> dict:
     """
     Find BookStack pages by title.
@@ -1832,7 +1849,7 @@ def bookstack_find_page(name: str, book_id: Optional[int] = None) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_list_pages(book_id: Optional[int] = None, chapter_id: Optional[int] = None) -> dict:
     """
     List all pages in a book or chapter.
@@ -1869,7 +1886,7 @@ def bookstack_list_pages(book_id: Optional[int] = None, chapter_id: Optional[int
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_read_page(page_id: int) -> dict:
     """
     Read a BookStack page by ID.
@@ -1920,7 +1937,7 @@ def bookstack_read_page(page_id: int) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_update_page(page_id: int, markdown: Optional[str] = None, name: Optional[str] = None) -> dict:
     """
     Update an existing BookStack page. Can update content, title, or both.
@@ -1965,7 +1982,7 @@ def bookstack_update_page(page_id: int, markdown: Optional[str] = None, name: Op
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_patch_page(
     page_id: int,
     old_string: str,
@@ -2038,7 +2055,7 @@ def bookstack_patch_page(
         return {"ok": False, "page_id": page_id, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_create_page(
     book_id: int,
     name: str,
@@ -2088,7 +2105,7 @@ def bookstack_create_page(
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_list_books() -> dict:
     """
     List all books in BookStack.
@@ -2121,7 +2138,7 @@ def bookstack_list_books() -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_get_book_contents(book_id: int) -> dict:
     """
     Return the chapter and page tree for a specific book.
@@ -2170,7 +2187,7 @@ def bookstack_get_book_contents(book_id: int) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_get_page_history(page_id: int, limit: int = 5) -> dict:
     """
     List recent revisions for a BookStack page.
@@ -2209,7 +2226,7 @@ def bookstack_get_page_history(page_id: int, limit: int = 5) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_delete_page(page_id: int, confirm: bool = False) -> dict:
     """
     Delete a BookStack page.
@@ -2242,7 +2259,7 @@ def bookstack_delete_page(page_id: int, confirm: bool = False) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_create_chapter(book_id: int, name: str, description: Optional[str] = None) -> dict:
     """
     Create a new chapter inside a book.
@@ -2274,7 +2291,7 @@ def bookstack_create_chapter(book_id: int, name: str, description: Optional[str]
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_update_chapter(chapter_id: int, name: Optional[str] = None, description: Optional[str] = None) -> dict:
     """
     Update a chapter's title and/or description.
@@ -2312,7 +2329,7 @@ def bookstack_update_chapter(chapter_id: int, name: Optional[str] = None, descri
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_delete_chapter(chapter_id: int, confirm: bool = False) -> dict:
     """
     Delete a BookStack chapter and all pages inside it.
@@ -2349,7 +2366,7 @@ def bookstack_delete_chapter(chapter_id: int, confirm: bool = False) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_create_book(name: str, description: Optional[str] = None) -> dict:
     """
     Create a new book in BookStack.
@@ -2380,7 +2397,7 @@ def bookstack_create_book(name: str, description: Optional[str] = None) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_update_book(book_id: int, name: Optional[str] = None, description: Optional[str] = None) -> dict:
     """
     Update a book's title and/or description.
@@ -2418,7 +2435,7 @@ def bookstack_update_book(book_id: int, name: Optional[str] = None, description:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_delete_book(book_id: int, confirm: bool = False) -> dict:
     """
     Delete a BookStack book and everything inside it (all chapters and pages).
@@ -2469,7 +2486,7 @@ def bookstack_delete_book(book_id: int, confirm: bool = False) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_get_page_metadata(page_id: int) -> dict:
     """
     Return metadata for a BookStack page without fetching its content.
@@ -2517,7 +2534,7 @@ def bookstack_get_page_metadata(page_id: int) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_move_page(page_id: int, entity_type: str, entity_id: int) -> dict:
     """
     Move a page to a different book or chapter.
@@ -2554,7 +2571,7 @@ def bookstack_move_page(page_id: int, entity_type: str, entity_id: int) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def bookstack_move_chapter(chapter_id: int, book_id: int) -> dict:
     """
     Move a chapter to a different book.
@@ -2598,7 +2615,7 @@ def _loki_cfg() -> str:
     return url
 
 
-@mcp.tool()
+@_tool
 def loki_query(
     since: str = "1h",
     limit: int = 50,
@@ -2702,7 +2719,7 @@ def _caddy_parse_destination(to_destination: str) -> tuple[str, str, str]:
     return http_tls, to_domain, to_port
 
 
-@mcp.tool()
+@_tool
 def caddy_list_routes() -> dict:
     """
     List all Caddy reverse proxy routes configured on OPNsense.
@@ -2755,7 +2772,7 @@ def caddy_list_routes() -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def caddy_add_route(
     from_domain: str,
     to_destination: str,
@@ -2849,7 +2866,7 @@ def caddy_add_route(
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def caddy_remove_route(uuid: str) -> dict:
     """
     Remove a Caddy reverse proxy route by UUID and apply the configuration.
@@ -2883,7 +2900,7 @@ def caddy_remove_route(uuid: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def opnsense_list_dhcp_leases(search: Optional[str] = None) -> dict:
     """
     List active DHCP leases from OPNsense.
@@ -2978,7 +2995,7 @@ def _cf_put_tunnel_config(account_id: str, tunnel_id: str, headers: dict, config
     return data.get("result", {})
 
 
-@mcp.tool()
+@_tool
 def cloudflare_list_tunnel_routes() -> dict:
     """
     List all ingress routes configured in the Cloudflare Tunnel.
@@ -3006,11 +3023,12 @@ def cloudflare_list_tunnel_routes() -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def cloudflare_add_tunnel_route(
     hostname: str,
     service: str,
     no_tls_verify: bool = False,
+    disable_chunked_encoding: bool = False,
 ) -> dict:
     """
     Add an ingress route to the Cloudflare Tunnel.
@@ -3022,6 +3040,8 @@ def cloudflare_add_tunnel_route(
         hostname: Public hostname to route (e.g. "app.pelorus.org").
         service: Internal backend URL (e.g. "http://192.168.0.10:3000").
         no_tls_verify: Skip TLS verification for the backend. Default False.
+        disable_chunked_encoding: Set disableChunkedEncoding in originRequest.
+                                  Required for some MCP/SSE backends. Default False.
     """
     if _re.search(r"127\.\d+\.\d+\.\d+|//localhost", service):
         return {"ok": False, "error": "Loopback backend addresses are not allowed."}
@@ -3035,8 +3055,13 @@ def cloudflare_add_tunnel_route(
             return {"ok": False, "error": f"Route for '{hostname}' already exists."}
 
         new_rule: dict[str, Any] = {"hostname": hostname, "service": service}
+        origin_req: dict[str, Any] = {}
         if no_tls_verify:
-            new_rule["originRequest"] = {"noTLSVerify": True}
+            origin_req["noTLSVerify"] = True
+        if disable_chunked_encoding:
+            origin_req["disableChunkedEncoding"] = True
+        if origin_req:
+            new_rule["originRequest"] = origin_req
 
         # Insert before the catch-all (last entry, which has no hostname)
         if ingress and not ingress[-1].get("hostname"):
@@ -3053,7 +3078,7 @@ def cloudflare_add_tunnel_route(
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def cloudflare_remove_tunnel_route(hostname: str) -> dict:
     """
     Remove an ingress route from the Cloudflare Tunnel by hostname.
@@ -3090,7 +3115,7 @@ def cloudflare_remove_tunnel_route(hostname: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@_tool
 def cloudflare_list_access_policies() -> dict:
     """
     List all Cloudflare Access applications and their associated policies.
@@ -3144,7 +3169,7 @@ def cloudflare_list_access_policies() -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-@mcp.tool()
+@_tool
 def cloudflare_add_access_policy(
     hostname: str,
     name: str,
@@ -3271,5 +3296,8 @@ if __name__ == "__main__":
     app.add_middleware(StripAuthMiddleware)
     app.add_middleware(BearerAuthMiddleware)
 
-    log.info("server starting", extra={"host": HOST, "port": PORT, "transport": "streamable_http"})
+    log.info("server starting", extra={
+        "host": HOST, "port": PORT, "transport": "streamable_http",
+        "tool_filter": sorted(_ENABLED_TOOLS) if _ENABLED_TOOLS is not None else "all",
+    })
     uvicorn.run(app, host=HOST, port=PORT)
