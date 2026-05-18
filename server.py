@@ -3261,12 +3261,23 @@ if __name__ == "__main__":
             path = request.url.path
             if path.startswith("/.well-known/oauth-"):
                 return JSONResponse({"error": "Not Found"}, status_code=404)
+            # Tell OAuth clients that dynamic registration is not supported.
+            if path == "/register":
+                return JSONResponse(
+                    {"error": "invalid_client_metadata",
+                     "error_description": "Dynamic client registration is not supported. Use a pre-configured bearer token."},
+                    status_code=400,
+                )
 
             token = os.environ.get("MCP_AUTH_TOKEN")
             if token:
                 auth = request.headers.get("authorization", "")
                 if auth != f"Bearer {token}":
-                    return JSONResponse({"error": "Unauthorized"}, status_code=401)
+                    return JSONResponse(
+                        {"error": "Unauthorized"},
+                        status_code=401,
+                        headers={"WWW-Authenticate": 'Bearer realm="MCP"'},
+                    )
             return await call_next(request)
 
     class StripAuthMiddleware(BaseHTTPMiddleware):
