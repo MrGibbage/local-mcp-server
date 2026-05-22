@@ -2631,7 +2631,7 @@ def loki_query(
     Args:
         since: How far back to query. Examples: "15m", "1h", "6h", "24h". Default "1h".
         limit: Maximum log lines to return. Default 50.
-        container: Container name shorthand — expands to {container_name="<value>"}.
+        container: Container name shorthand — expands to {container="<value>"}.
         query: Raw LogQL query. Overrides container if both provided.
                Example: '{compose_project=~".+"} |= "error"'
     """
@@ -2641,7 +2641,7 @@ def loki_query(
         if query:
             logql = query
         elif container:
-            logql = f'{{container_name="{container}"}}'
+            logql = f'{{container="{container}"}}'
         else:
             return {"ok": False, "error": "Provide either container or query."}
 
