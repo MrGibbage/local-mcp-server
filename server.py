@@ -699,7 +699,8 @@ def docker_network_list(host: Optional[str] = None) -> dict:
 
 
 @_tool
-def http_get(url: str, expected_status: Optional[int] = None, host: Optional[str] = None) -> dict:
+def http_get(url: str, expected_status: Optional[int] = None, host: Optional[str] = None,
+             headers: Optional[dict] = None) -> dict:
     """
     Make an HTTP GET request and return the status code and response body.
 
@@ -711,10 +712,12 @@ def http_get(url: str, expected_status: Optional[int] = None, host: Optional[str
         url: URL to fetch.
         expected_status: If provided, ok=False when the response status doesn't match.
         host: Named host from config. If specified, curl runs on that host via SSH.
+        headers: Optional dict of HTTP headers (e.g. {"Authorization": "Bearer tk_..."}).
     """
     try:
         if host:
-            result = _run(host, f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 10 {url!r}")
+            header_flags = "".join(f" -H {shlex.quote(k + ': ' + v)}" for k, v in (headers or {}).items())
+            result = _run(host, f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 10{header_flags} {url!r}")
             if result["exit_code"] != 0:
                 return {"ok": False, "url": url, "host": result["host"],
                         "error": result["stderr"] or result["stdout"]}
@@ -725,7 +728,7 @@ def http_get(url: str, expected_status: Optional[int] = None, host: Optional[str
                     **({"expected_status": expected_status,
                         "error": f"Expected {expected_status}, got {status_code}"} if not matched else {})}
         else:
-            resp = _requests.get(url, timeout=10, verify=False)
+            resp = _requests.get(url, timeout=10, verify=False, headers=headers or {})
             status_code = resp.status_code
             matched = expected_status is None or status_code == expected_status
             return {"ok": matched, "url": url, "status_code": status_code,
