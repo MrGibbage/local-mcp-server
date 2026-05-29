@@ -1083,6 +1083,125 @@ def patch_file(
 
 
 @_tool
+def regex_patch_file(
+    path: str,
+    pattern: str,
+    replacement: str,
+    host: Optional[str] = None,
+    flags: str = "",
+    use_sudo: bool = False,
+) -> dict:
+    """
+    Make a targeted regex replacement in a remote file over SSH (SFTP).
+
+    Reads the file, applies re.sub(pattern, replacement, content, flags=...) and
+    writes it back. Use this over patch_file when the match spans many lines or
+    requires pattern syntax (e.g. removing an entire function block with DOTALL).
+
+    If the pattern matches zero times the tool refuses and returns an error so
+    you know the pattern needs adjustment before anything is written.
+
+    Args:
+        path: Absolute path to the file on the remote host.
+        pattern: Python regex pattern string.
+        replacement: Replacement string (supports backreferences like \\1).
+        host: Named host from config (defaults to default_host).
+        flags: Pipe-separated regex flag names, e.g. "DOTALL" or "DOTALL|MULTILINE".
+               Supported: DOTALL, MULTILINE, IGNORECASE, VERBOSE.
+        use_sudo: If True, read via 'sudo cat' and write via 'sudo tee'.
+    """
+    flag_map = {
+        "DOTALL": _re.DOTALL,
+        "MULTILINE": _re.MULTILINE,
+        "IGNORECASE": _re.IGNORECASE,
+        "VERBOSE": _re.VERBOSE,
+    }
+    re_flags = 0
+    for name in (f.strip() for f in flags.split("|") if f.strip()):
+        if name not in flag_map:
+            return {"ok": False, "error": f"Unknown flag: {name!r}. Supported: {list(flag_map)}", "path": path}
+        re_flags |= flag_map[name]
+
+    try:
+        compiled = _re.compile(pattern, re_flags)
+    except _re.error as exc:
+        return {"ok": False, "error": f"Invalid regex: {exc}", "path": path}
+
+    try:
+        host_name, host_cfg = _resolve_host(host)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "host": host, "path": path}
+
+    connect_kwargs: dict[str, Any] = {
+        "hostname": host_cfg["hostname"],
+        "username": host_cfg.get("user", "root"),
+        "timeout": 30,
+    }
+    key_path = host_cfg.get("key_path")
+    if key_path:
+        connect_kwargs["key_filename"] = str(key_path)
+    port = host_cfg.get("port", 22)
+    if port != 22:
+        connect_kwargs["port"] = int(port)
+
+    def _apply(content: str) -> tuple[str, int]:
+        matches = len(compiled.findall(content))
+        if matches == 0:
+            return content, 0
+        return compiled.sub(replacement, content), matches
+
+    if use_sudo:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(**connect_kwargs)
+            _, stdout_r, stderr_r = client.exec_command(f"sudo cat {path}", timeout=30)
+            content = stdout_r.read().decode("utf-8", errors="replace")
+            if stdout_r.channel.recv_exit_status() != 0:
+                err = stderr_r.read().decode("utf-8", errors="replace").strip()
+                return {"ok": False, "error": err, "host": host_name, "path": path}
+            new_content, count = _apply(content)
+            if count == 0:
+                return {"ok": False, "error": "Pattern matched zero times — nothing written.", "host": host_name, "path": path}
+            stdin_w, stdout_w, stderr_w = client.exec_command(f"sudo tee {path} > /dev/null", timeout=30)
+            stdin_w.write(new_content.encode("utf-8"))
+            stdin_w.channel.shutdown_write()
+            exit_code = stdout_w.channel.recv_exit_status()
+            err = stderr_w.read().decode("utf-8", errors="replace").strip()
+            if exit_code != 0:
+                return {"ok": False, "error": err, "host": host_name, "path": path}
+            return {"ok": True, "host": host_name, "path": path, "replacements": count}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc), "host": host_name, "path": path}
+        finally:
+            client.close()
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(**connect_kwargs)
+        sftp = client.open_sftp()
+
+        with sftp.file(path, "r") as f:
+            content = f.read().decode("utf-8", errors="replace")
+
+        new_content, count = _apply(content)
+        if count == 0:
+            sftp.close()
+            return {"ok": False, "error": "Pattern matched zero times — nothing written.", "host": host_name, "path": path}
+
+        with sftp.file(path, "w") as f:
+            f.write(new_content.encode("utf-8"))
+        sftp.close()
+
+        return {"ok": True, "host": host_name, "path": path, "replacements": count}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc), "host": host_name, "path": path}
+    finally:
+        client.close()
+
+
+@_tool
 def tail_file(path: str, lines: int = 50, host: Optional[str] = None) -> dict:
     """
     Return the last N lines of a file on a remote host.
