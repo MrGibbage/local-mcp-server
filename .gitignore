@@ -36,3 +36,7 @@ test_caddy.py
 .idea/
 *.swp
 *.swo
+
+# Claude Code — local permission overrides and working docs
+.claude/settings.local.json
+homelab-api-proxy-spec.md
