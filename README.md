@@ -73,31 +73,6 @@ A self-hosted [Model Context Protocol](https://modelcontextprotocol.io/) server 
 |---|---|
 | `loki_query` | Query Loki for logs using LogQL |
 
-### BookStack
-
-| Tool | Description |
-|---|---|
-| `bookstack_search` | Search pages, chapters, and books |
-| `bookstack_find_page` | Find pages by title |
-| `bookstack_list_pages` | List all pages in a book or chapter |
-| `bookstack_list_books` | List all books |
-| `bookstack_get_book_contents` | Return the chapter and page tree for a book |
-| `bookstack_get_page_metadata` | Return page metadata without fetching content |
-| `bookstack_get_page_history` | List recent revisions for a page |
-| `bookstack_read_page` | Read a page by ID |
-| `bookstack_create_page` | Create a new page with Markdown content |
-| `bookstack_update_page` | Update a page's content and/or title |
-| `bookstack_patch_page` | Patch a page by replacing a string in its content |
-| `bookstack_delete_page` | Delete a page |
-| `bookstack_move_page` | Move a page to a different book or chapter |
-| `bookstack_create_chapter` | Create a new chapter inside a book |
-| `bookstack_update_chapter` | Update a chapter's title and/or description |
-| `bookstack_delete_chapter` | Delete a chapter and all pages inside it |
-| `bookstack_create_book` | Create a new book |
-| `bookstack_update_book` | Update a book's title and/or description |
-| `bookstack_delete_book` | Delete a book and everything inside it |
-| `bookstack_move_chapter` | Move a chapter to a different book |
-
 ### Caddy / OPNsense
 
 | Tool | Description |
