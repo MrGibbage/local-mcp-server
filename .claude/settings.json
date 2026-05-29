@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep *)",
+      "Bash(find *)",
+      "Bash(cat *)",
+      "Bash(which *)",
+      "Bash(strings *)",
+      "mcp__homelab-mcp__read_file",
+      "mcp__homelab-mcp__list_directory",
+      "mcp__homelab-mcp__docker_ps",
+      "mcp__homelab-mcp__bookstack_search",
+      "mcp__homelab-mcp__bookstack_read_page"
+    ]
+  }
+}
