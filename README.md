@@ -4,21 +4,118 @@ A self-hosted [Model Context Protocol](https://modelcontextprotocol.io/) server 
 
 ## Tools
 
+### Host & Shell
+
 | Tool | Description |
 |---|---|
-| `list_hosts` | List configured hosts |
+| `list_hosts` | List all configured hosts |
 | `ssh_exec` | Run an arbitrary shell command on a host |
+| `disk_usage` | `df -h` summary |
+| `memory_usage` | `free -h` summary |
+| `http_get` | Make an HTTP GET request and return status + body |
+
+### Docker
+
+| Tool | Description |
+|---|---|
 | `docker_ps` | List running containers |
-| `docker_logs` | Fetch container logs |
+| `docker_logs` | Fetch recent container logs |
 | `docker_restart` | Restart a container |
 | `docker_stop` / `docker_start` | Stop or start a container |
 | `docker_pull` | Pull an image |
-| `docker_compose_up` / `docker_compose_down` | Manage compose stacks |
-| `systemctl_status` / `systemctl_restart` | Manage systemd services |
+| `docker_inspect` | Inspect a container's configuration and runtime state |
+| `docker_exec` | Run a command inside a running container |
+| `docker_capabilities` | Return decoded Linux capabilities for a container |
+| `docker_stats` | One-shot resource usage snapshot for a container |
+| `docker_compose_up` / `docker_compose_down` | Manage Compose stacks |
+| `docker_compose_logs` | Fetch logs from all services in a Compose stack |
+| `docker_network_list` | List Docker networks |
+
+### Systemd
+
+| Tool | Description |
+|---|---|
+| `systemctl_status` | Return the status of a systemd service |
+| `systemctl_restart` | Restart a systemd service |
+| `systemctl_list` | List systemd units with optional state filter |
+
+### Files
+
+| Tool | Description |
+|---|---|
 | `read_file` | Read a remote file over SFTP |
 | `write_file` | Write/overwrite a remote file over SFTP |
-| `disk_usage` | `df -h` summary |
-| `memory_usage` | `free -h` summary |
+| `patch_file` | Targeted string replacement in a remote file |
+| `regex_patch_file` | Targeted regex replacement in a remote file |
+| `tail_file` | Return the last N lines of a remote file |
+| `grep_file` | Search for a pattern in a remote file |
+| `stat_file` | Return metadata for a file or directory |
+| `list_directory` | List directory contents with ownership and permissions |
+| `make_directory` | Create a directory (and missing parents) on a remote host |
+| `backup_file` | Create a timestamped backup of a file before editing |
+| `validate_config` | Validate a YAML or JSON config file without restarting |
+| `rclone_ls` | List files on an rclone remote |
+
+### Proxmox
+
+| Tool | Description |
+|---|---|
+| `proxmox_vm_list` | List all VMs and containers on a Proxmox node |
+| `proxmox_snapshot_list` | List snapshots for a VM or container |
+| `proxmox_snapshot_create` | Create a disk-only snapshot |
+| `proxmox_snapshot_delete` | Delete a snapshot |
+| `proxmox_task_status` | Poll the status of a Proxmox task by UPID |
+| `proxmox_storage_info` | Return storage status for all active storage on a node |
+
+### Loki
+
+| Tool | Description |
+|---|---|
+| `loki_query` | Query Loki for logs using LogQL |
+
+### BookStack
+
+| Tool | Description |
+|---|---|
+| `bookstack_search` | Search pages, chapters, and books |
+| `bookstack_find_page` | Find pages by title |
+| `bookstack_list_pages` | List all pages in a book or chapter |
+| `bookstack_list_books` | List all books |
+| `bookstack_get_book_contents` | Return the chapter and page tree for a book |
+| `bookstack_get_page_metadata` | Return page metadata without fetching content |
+| `bookstack_get_page_history` | List recent revisions for a page |
+| `bookstack_read_page` | Read a page by ID |
+| `bookstack_create_page` | Create a new page with Markdown content |
+| `bookstack_update_page` | Update a page's content and/or title |
+| `bookstack_patch_page` | Patch a page by replacing a string in its content |
+| `bookstack_delete_page` | Delete a page |
+| `bookstack_move_page` | Move a page to a different book or chapter |
+| `bookstack_create_chapter` | Create a new chapter inside a book |
+| `bookstack_update_chapter` | Update a chapter's title and/or description |
+| `bookstack_delete_chapter` | Delete a chapter and all pages inside it |
+| `bookstack_create_book` | Create a new book |
+| `bookstack_update_book` | Update a book's title and/or description |
+| `bookstack_delete_book` | Delete a book and everything inside it |
+| `bookstack_move_chapter` | Move a chapter to a different book |
+
+### Caddy / OPNsense
+
+| Tool | Description |
+|---|---|
+| `caddy_list_routes` | List all Caddy reverse proxy routes on OPNsense |
+| `caddy_add_route` | Add a Caddy reverse proxy route and apply config |
+| `caddy_remove_route` | Remove a Caddy reverse proxy route by UUID |
+| `opnsense_list_dhcp_leases` | List active DHCP leases from OPNsense |
+
+### Cloudflare
+
+| Tool | Description |
+|---|---|
+| `cloudflare_list_tunnel_routes` | List all Cloudflare Tunnel ingress routes |
+| `cloudflare_add_tunnel_route` | Add an ingress route to the Cloudflare Tunnel |
+| `cloudflare_remove_tunnel_route` | Remove a tunnel route by hostname |
+| `cloudflare_list_access_policies` | List Access applications and their policies |
+| `cloudflare_add_access_policy` | Create an Access application and allow policy |
 
 ## Prerequisites
 
