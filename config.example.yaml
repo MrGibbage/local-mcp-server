@@ -72,3 +72,36 @@ bookstack:
 #   - cat
 #   - ls
 #   - journalctl
+
+# ---------------------------------------------------------------------------
+# Homelab API proxy — credentials come from env vars in .env, never here.
+# Add a new service: append a block, add the env var to .env, restart.
+# To verify a new service: homelab_api_get("<service>", "/system/status")
+# ---------------------------------------------------------------------------
+
+api_services:
+
+  # --- Example: Radarr on smavm ---
+  radarr:
+    base_url: http://192.168.1.100:7878/api/v3
+    auth_style: header        # header | bearer | token | query_param
+    auth_header: X-Api-Key    # used when auth_style: header
+    auth_env: RADARR_API_KEY  # env var name in .env
+    post_allowlist:
+      - /command              # trigger rescan, refresh, search
+      - /movie/editor         # bulk edit (tag/monitor only — no delete key in body)
+
+  # --- Example: SABnzbd (uses query_param auth) ---
+  sabnzbd:
+    base_url: http://192.168.1.100:8080
+    auth_style: query_param
+    auth_param: apikey        # used when auth_style: query_param
+    auth_env: SABNZBD_API_KEY
+    # No post_allowlist — SABnzbd uses GET ?mode= for everything
+
+  # --- Example: Grafana (bearer token, read-only via Claude) ---
+  grafana:
+    base_url: http://192.168.1.101:3000/api
+    auth_style: bearer
+    auth_env: GRAFANA_API_TOKEN
+    # No post_allowlist — writes belong in the UI

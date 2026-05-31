@@ -40,3 +40,8 @@ test_caddy.py
 # Claude Code — local permission overrides and working docs
 .claude/settings.local.json
 homelab-api-proxy-spec.md
+
+# Temporary working copies of Windows-side files (live in C:\Users\skip\.claude\)
+homelab-services.md
+setup-mcp.ps1
+skill-*.md

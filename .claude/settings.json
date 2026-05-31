@@ -12,5 +12,18 @@
       "mcp__homelab-mcp__bookstack_search",
       "mcp__homelab-mcp__bookstack_read_page"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /srv/local-mcp-server/.claude/hooks/block_homelab_direct_calls.py"
+          }
+        ]
+      }
+    ]
   }
 }
