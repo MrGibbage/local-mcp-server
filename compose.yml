@@ -18,6 +18,8 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./keys:/keys:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/windows/holocron:/mnt/windows/holocron:rw
+      - /mnt/windows/claude:/mnt/windows/claude:ro
     env_file:
       - /etc/homelab/homelab-mcp.env
     environment:
