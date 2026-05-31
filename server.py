@@ -7,6 +7,7 @@ Connects to remote hosts via SSH using paramiko.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -2521,6 +2522,215 @@ def cloudflare_add_access_policy(
         return {"ok": False, "error": str(exc)}
     except _requests.RequestException as exc:
         return {"ok": False, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Tools — Homelab API proxy
+# ---------------------------------------------------------------------------
+
+
+def _api_svc_cfg(service: str) -> dict:
+    """Resolve config for a named api_service. Raises ValueError on misconfiguration."""
+    services = CONFIG.get("api_services", {})
+    if service not in services:
+        available = sorted(services.keys())
+        raise ValueError(f"Unknown service '{service}'. Available: {available}")
+    cfg = dict(services[service])
+    style = cfg.get("auth_style", "header")
+    if style == "basic":
+        user_env = cfg.get("auth_env_user", "")
+        pass_env = cfg.get("auth_env_pass", "")
+        user = os.environ.get(user_env, "") if user_env else ""
+        password = os.environ.get(pass_env, "") if pass_env else ""
+        missing = [e for e, v in ((user_env, user), (pass_env, password)) if not v]
+        if missing:
+            raise ValueError(
+                f"Credential env var(s) {missing} not set for service '{service}'. "
+                f"Add them to .env on docker-server and restart the container."
+            )
+        cfg["_token"] = f"{user}:{password}"
+    else:
+        auth_env = cfg.get("auth_env", "")
+        token = os.environ.get(auth_env, "") if auth_env else ""
+        if not token:
+            raise ValueError(
+                f"Credential env var '{auth_env}' is not set for service '{service}'. "
+                f"Add it to .env on docker-server and restart the container."
+            )
+        cfg["_token"] = token
+    return cfg
+
+
+def _api_build_request(cfg: dict, path: str, params: dict | None) -> tuple[str, dict, dict]:
+    """Return (url, headers, params_dict) with auth injected."""
+    base_url = cfg["base_url"].rstrip("/")
+    url = base_url + path
+    headers: dict = {}
+    params = dict(params or {})
+    style = cfg.get("auth_style", "header")
+    token = cfg["_token"]
+
+    if style == "header":
+        headers[cfg["auth_header"]] = token
+    elif style == "bearer":
+        headers["Authorization"] = f"Bearer {token}"
+    elif style == "token":
+        headers["Authorization"] = f"Token {token}"
+    elif style == "query_param":
+        params[cfg["auth_param"]] = token
+    elif style == "basic":
+        # token is "user:password" — split on first colon so passwords with colons work
+        encoded = base64.b64encode(token.encode()).decode()
+        headers["Authorization"] = f"Basic {encoded}"
+    elif style == "googlelogin":
+        headers["Authorization"] = f"GoogleLogin auth={token}"
+
+    return url, headers, params
+
+
+@_tool
+def homelab_api_get(service: str, path: str, params: Optional[dict] = None) -> dict:
+    """
+    Proxy a GET request to a homelab service without exposing credentials.
+
+    ALWAYS use this tool instead of curl or http_get when reading data from any
+    configured homelab service (Radarr, Sonarr, Sonarr4K, Radarr4K, Jellyfin,
+    SABnzbd, Tautulli, Seerr, Grafana, InfluxDB, Shlink, Ntfy, N8N, Karakeep,
+    Changedetection). Credentials are resolved server-side and never appear in
+    Claude's context.
+
+    If this tool returns an error, report it — do NOT fall back to curl or http_get.
+
+    Args:
+        service: Service name from api_services config (e.g. "radarr", "jellyfin").
+        path: API path starting with / (e.g. "/movie", "/api/v2").
+        params: Optional query parameters as a dict.
+    """
+    try:
+        cfg = _api_svc_cfg(service)
+        url, headers, resolved_params = _api_build_request(cfg, path, params)
+        resp = _requests.get(url, headers=headers, params=resolved_params, timeout=15, verify=False)
+        try:
+            data = resp.json()
+        except Exception:
+            data = resp.text
+        return {"ok": resp.ok, "status": resp.status_code, "data": data}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+
+
+@_tool
+def homelab_api_post(service: str, path: str, body: Optional[dict] = None) -> dict:
+    """
+    Proxy a POST request to a homelab service without exposing credentials.
+
+    ALWAYS use this tool instead of curl when POSTing to configured homelab services.
+    Only paths listed in the service's post_allowlist are permitted — the tool will
+    return a clear error for any unlisted path.
+
+    If this tool returns an error, report it — do NOT fall back to curl.
+
+    Args:
+        service: Service name from api_services config.
+        path: API path starting with /. Must match a post_allowlist prefix.
+        body: Optional JSON request body as a dict.
+    """
+    try:
+        cfg = _api_svc_cfg(service)
+        allowlist: list[str] = cfg.get("post_allowlist", [])
+        if not allowlist:
+            return {
+                "ok": False,
+                "error": f"POST is not configured for service '{service}'. No post_allowlist defined.",
+            }
+        if not any(
+            path == entry or path.startswith(entry.rstrip("/") + "/") for entry in allowlist
+        ):
+            return {
+                "ok": False,
+                "error": (
+                    f"POST to '{path}' is not permitted for '{service}'. "
+                    f"Allowed prefixes: {allowlist}"
+                ),
+            }
+        url, headers, resolved_params = _api_build_request(cfg, path, {})
+        headers["Content-Type"] = "application/json"
+        resp = _requests.post(
+            url, headers=headers, params=resolved_params, json=body or {}, timeout=15, verify=False
+        )
+        try:
+            data = resp.json()
+        except Exception:
+            data = resp.text
+        return {"ok": resp.ok, "status": resp.status_code, "data": data}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+
+
+@_tool
+def homelab_api_mutate(
+    service: str,
+    method: str,
+    path: str,
+    body: Optional[dict] = None,
+    confirmed: bool = False,
+) -> dict:
+    """
+    Proxy a PUT, PATCH, or DELETE request to a homelab service.
+
+    Only call this tool when the user has explicitly confirmed the specific operation
+    in their current message. Do NOT set confirmed=True based on general task context
+    or inferred intent — if there is any ambiguity, ask first.
+
+    If confirmed=False (the default), this tool returns an error without making any
+    HTTP request. Ask the user to confirm, then call again with confirmed=True.
+
+    Args:
+        service: Service name from api_services config.
+        method: HTTP method — "PUT", "PATCH", or "DELETE".
+        path: API path starting with /.
+        body: Optional JSON request body (ignored for DELETE).
+        confirmed: Set True only after the user has explicitly confirmed this specific
+                   destructive operation in the current conversation.
+    """
+    if not confirmed:
+        return {
+            "ok": False,
+            "error": (
+                "confirmed=False. Describe the operation to the user and ask them to "
+                "explicitly confirm before calling this tool with confirmed=True."
+            ),
+        }
+    try:
+        method = method.upper()
+        if method not in ("PUT", "PATCH", "DELETE"):
+            return {"ok": False, "error": f"Method '{method}' not permitted. Use PUT, PATCH, or DELETE."}
+        cfg = _api_svc_cfg(service)
+        url, headers, resolved_params = _api_build_request(cfg, path, {})
+        headers["Content-Type"] = "application/json"
+        if method == "DELETE":
+            resp = _requests.delete(url, headers=headers, params=resolved_params, timeout=15, verify=False)
+        elif method == "PUT":
+            resp = _requests.put(
+                url, headers=headers, params=resolved_params, json=body or {}, timeout=15, verify=False
+            )
+        else:
+            resp = _requests.patch(
+                url, headers=headers, params=resolved_params, json=body or {}, timeout=15, verify=False
+            )
+        try:
+            data = resp.json()
+        except Exception:
+            data = resp.text
+        return {"ok": resp.ok, "status": resp.status_code, "data": data}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
 
 
 # ---------------------------------------------------------------------------
