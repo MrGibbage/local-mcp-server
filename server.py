@@ -147,6 +147,28 @@ def _check_allowlist(command: str) -> None:
         )
 
 
+# Sensitive file patterns — these must never be read or written through MCP tools.
+_SECRET_PATH_PATTERNS: list[_re.Pattern] = [
+    _re.compile(r"/etc/homelab/"),
+    _re.compile(r"/srv/local-mcp-server/\.env"),
+    _re.compile(r"/srv/local-mcp-server/keys/"),
+    _re.compile(r"(^|/)\.env(\.[^/]*)?$"),
+    _re.compile(r"\.openclaw/"),
+    _re.compile(r"\.ssh/(?!.*\.pub$)"),
+    _re.compile(r"/proc/\d+/environ"),
+]
+
+
+def _check_secret_path(path: str) -> None:
+    """Raise ValueError if path matches a sensitive file pattern."""
+    for pattern in _SECRET_PATH_PATTERNS:
+        if pattern.search(path):
+            raise ValueError(
+                f"blocked: '{path}' matches the secret-path guard. "
+                "Credential files must not be read or written through MCP tools."
+            )
+
+
 def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60) -> dict[str, Any]:
     """Open a fresh SSH connection, run command, return stdout/stderr/exit_code.
 
@@ -827,6 +849,7 @@ def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200,
                   sudo on the target host.
     """
     try:
+        _check_secret_path(path)
         host_name, host_cfg = _resolve_host(host)
     except ValueError as exc:
         return {"content": None, "error": str(exc), "host": host, "path": path}
@@ -895,6 +918,7 @@ def write_file(path: str, content: str, host: Optional[str] = None,
                   sudo on the target host.
     """
     try:
+        _check_secret_path(path)
         host_name, host_cfg = _resolve_host(host)
     except ValueError as exc:
         return {"success": False, "error": str(exc), "host": host, "path": path}
@@ -986,6 +1010,7 @@ def patch_file(
                   passwordless sudo on the target host.
     """
     try:
+        _check_secret_path(path)
         host_name, host_cfg = _resolve_host(host)
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "host": host, "path": path}
@@ -1129,6 +1154,7 @@ def regex_patch_file(
         return {"ok": False, "error": f"Invalid regex: {exc}", "path": path}
 
     try:
+        _check_secret_path(path)
         host_name, host_cfg = _resolve_host(host)
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "host": host, "path": path}
@@ -1216,6 +1242,7 @@ def tail_file(path: str, lines: int = 50, host: Optional[str] = None) -> dict:
         host: Named host from config (defaults to default_host).
     """
     try:
+        _check_secret_path(path)
         capped = min(int(lines), 500)
         result = _run(host, f"tail -n {capped} {path}")
         if result["exit_code"] != 0:
@@ -1245,6 +1272,7 @@ def grep_file(path: str, pattern: str, host: Optional[str] = None, context: int 
         context: Number of lines to show before and after each match (default 0, max 5).
     """
     try:
+        _check_secret_path(path)
         ctx = min(int(context), 5)
         ctx_flag = f" -C {ctx}" if ctx > 0 else ""
         result = _run(host, f"grep -n{ctx_flag} {pattern!r} {path}")
