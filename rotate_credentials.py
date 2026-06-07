@@ -10,7 +10,6 @@ Automation level per service:
   Proxmox    — fully automated (create-before-delete, no access gap)
   Cloudflare — manual prompt (current tokens lack API Tokens: Edit permission)
   OPNsense   — manual prompt (API key has limited scope, no user management)
-  BookStack  — manual prompt (no token management API)
 
 Secrets live in /srv/local-mcp-server/.env — config.yaml contains no secrets.
 
@@ -212,28 +211,7 @@ In the user's edit page, scroll to the "API Keys" section:
 
 # ─── BookStack ────────────────────────────────────────────────────────────────
 
-def rotate_bookstack(env: dict, cfg: dict):
-    section("BookStack: Manual token rotation")
-    bs_url = cfg.get("bookstack", {}).get("url", "")
-    id_prefix = env.get("BOOKSTACK_TOKEN_ID", "")[:8]
-
-    print(f"""
-Go to: {bs_url}/settings/api-tokens
-
-Find the token whose ID starts with: {id_prefix}...
-Delete it, then:
-  1. Click "Create Token"
-  2. Give it a name (e.g. "mcp-server")
-  3. Copy the Token ID and Token Secret — the secret is only shown once!
-""")
-
-    new_id = prompt_value("New BOOKSTACK_TOKEN_ID", "Paste the new BookStack Token ID:")
-    patch_env("BOOKSTACK_TOKEN_ID", new_id)
-
-    new_secret = prompt_value("New BOOKSTACK_TOKEN_SECRET", "Paste the new BookStack Token Secret:")
-    patch_env("BOOKSTACK_TOKEN_SECRET", new_secret)
-
-    print("BookStack credentials updated in .env")
+# rotate_bookstack() removed — BookStack decommissioned 2026-05-27 (migrated to Holocron).
 
 
 # ─── Restart & Verify ─────────────────────────────────────────────────────────
@@ -254,23 +232,6 @@ def restart_container():
 def verify_services(cfg: dict, env: dict) -> bool:
     section("Verifying services with new credentials")
     all_ok = True
-
-    # BookStack
-    try:
-        bs = cfg.get("bookstack", {})
-        r = requests.get(
-            f"{bs['url']}/api/books",
-            headers={"Authorization": f"Token {env['BOOKSTACK_TOKEN_ID']}:{env['BOOKSTACK_TOKEN_SECRET']}"},
-            timeout=10,
-        )
-        if r.status_code == 200:
-            print(f"  [OK] BookStack — {r.json().get('total', '?')} books accessible")
-        else:
-            print(f"  [FAIL] BookStack — HTTP {r.status_code}")
-            all_ok = False
-    except Exception as e:
-        print(f"  [FAIL] BookStack — {e}")
-        all_ok = False
 
     # Proxmox nodes
     for node in cfg.get("proxmox_nodes", []):
@@ -354,7 +315,7 @@ def main():
     # Phase 2-4: Manual services — prompts user, updates .env as each is entered
     rotate_cloudflare(env)
     rotate_opnsense(env, cfg)
-    rotate_bookstack(env, cfg)
+    # BookStack rotation removed — service decommissioned 2026-05-27 (migrated to Holocron)
 
     # Phase 5: Restart container with new credentials
     restart_container()
