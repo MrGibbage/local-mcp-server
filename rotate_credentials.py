@@ -209,11 +209,6 @@ In the user's edit page, scroll to the "API Keys" section:
     print("OPNsense credentials updated in .env")
 
 
-# ─── BookStack ────────────────────────────────────────────────────────────────
-
-# rotate_bookstack() removed — BookStack decommissioned 2026-05-27 (migrated to Holocron).
-
-
 # ─── Restart & Verify ─────────────────────────────────────────────────────────
 
 def restart_container():
