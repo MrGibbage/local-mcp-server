@@ -1,7 +1,7 @@
 """
 Homelab MCP Server
 ------------------
-An MCP server that exposes homelab management tools over SSE transport.
+An MCP server that exposes homelab management tools over Streamable HTTP transport.
 Connects to remote hosts via SSH using paramiko.
 """
 
