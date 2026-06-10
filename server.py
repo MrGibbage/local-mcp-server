@@ -1914,6 +1914,107 @@ def proxmox_storage_info(host: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+@_tool
+def proxmox_vm_start(host: str, vmid: int, confirmed: bool = False) -> dict:
+    """
+    Start a stopped Proxmox VM or container.
+
+    Requires confirmed=True — only set this after the user has explicitly
+    approved starting this VM in the current conversation.
+
+    Waits up to 2 minutes for the start task to complete.
+
+    Args:
+        host: Proxmox node name from config (e.g. 'proxmox1').
+        vmid: VM or container ID.
+        confirmed: Must be True to execute. Default False blocks the action.
+    """
+    if not confirmed:
+        return {
+            "ok": False,
+            "error": "Set confirmed=True after the user explicitly approves starting this VM.",
+            "host": host,
+            "vmid": vmid,
+        }
+    try:
+        node_cfg = _resolve_proxmox_node(host)
+        node = node_cfg["node"]
+        vm_type = "qemu"
+        try:
+            resp = _proxmox_api(node_cfg, "POST", f"/nodes/{node}/qemu/{vmid}/status/start")
+        except _requests.RequestException:
+            vm_type = "lxc"
+            resp = _proxmox_api(node_cfg, "POST", f"/nodes/{node}/lxc/{vmid}/status/start")
+        upid = resp.get("data", "")
+        task_result = _proxmox_wait_task(node_cfg, upid, timeout=120)
+        return {
+            "ok": task_result["ok"],
+            "node": node,
+            "vmid": vmid,
+            "vm_type": vm_type,
+            "action": "start",
+            "upid": upid,
+            "exitstatus": task_result.get("exitstatus"),
+            **({"error": task_result["error"]} if not task_result["ok"] and "error" in task_result else {}),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@_tool
+def proxmox_vm_stop(host: str, vmid: int, confirmed: bool = False) -> dict:
+    """
+    Gracefully shut down a running Proxmox VM or container (ACPI shutdown).
+
+    Sends the ACPI shutdown signal so the guest OS shuts down cleanly.
+    For a hard power-off, use the Proxmox web UI directly.
+
+    Requires confirmed=True — only set this after the user has explicitly
+    approved stopping this VM in the current conversation.
+
+    Waits up to 3 minutes for shutdown to complete.
+
+    Args:
+        host: Proxmox node name from config (e.g. 'proxmox1').
+        vmid: VM or container ID.
+        confirmed: Must be True to execute. Default False blocks the action.
+    """
+    if not confirmed:
+        return {
+            "ok": False,
+            "error": "Set confirmed=True after the user explicitly approves stopping this VM.",
+            "host": host,
+            "vmid": vmid,
+        }
+    try:
+        node_cfg = _resolve_proxmox_node(host)
+        node = node_cfg["node"]
+        vm_type = "qemu"
+        try:
+            resp = _proxmox_api(node_cfg, "POST", f"/nodes/{node}/qemu/{vmid}/status/shutdown")
+        except _requests.RequestException:
+            vm_type = "lxc"
+            resp = _proxmox_api(node_cfg, "POST", f"/nodes/{node}/lxc/{vmid}/status/shutdown")
+        upid = resp.get("data", "")
+        task_result = _proxmox_wait_task(node_cfg, upid, timeout=180)
+        return {
+            "ok": task_result["ok"],
+            "node": node,
+            "vmid": vmid,
+            "vm_type": vm_type,
+            "action": "shutdown",
+            "upid": upid,
+            "exitstatus": task_result.get("exitstatus"),
+            **({"error": task_result["error"]} if not task_result["ok"] and "error" in task_result else {}),
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Tools — BookStack
 # Removed 2026-05-29: BookStack decommissioned. Full implementation preserved
