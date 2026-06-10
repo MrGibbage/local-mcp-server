@@ -133,17 +133,22 @@ def _resolve_host(host: str | None) -> tuple[str, dict]:
     return name, hosts[name]
 
 
-def _check_allowlist(command: str) -> None:
-    """Raise ValueError if the command's first token is not on the allowlist."""
-    if ALLOWLIST is None:
+def _check_allowlist(command: str, host_cfg: dict | None = None) -> None:
+    """Raise ValueError if the command's first token is not on the allowlist.
+
+    Merges the global ssh_command_allowlist with any host-level
+    ssh_command_allowlist defined in the host's config block.
+    """
+    host_extra: list[str] = (host_cfg or {}).get("ssh_command_allowlist", [])
+    if ALLOWLIST is None and not host_extra:
         return
-    # Extract the base command name (strip path prefix)
+    effective: list[str] = (ALLOWLIST or []) + host_extra
     first_token = command.strip().split()[0] if command.strip() else ""
     base = first_token.split("/")[-1]
-    if base not in ALLOWLIST:
+    if base not in effective:
         raise ValueError(
             f"Command '{base}' is not on the ssh_command_allowlist. "
-            f"Allowed: {ALLOWLIST}"
+            f"Allowed: {effective}"
         )
 
 
@@ -358,7 +363,8 @@ def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200,
             for known slow operations (e.g. package installs). Max recommended: 90.
     """
     try:
-        _check_allowlist(command)
+        _, host_cfg = _resolve_host(host)
+        _check_allowlist(command, host_cfg)
         if cwd:
             command = f"cd {cwd} && {command}"
         result = _run(host, command, timeout=timeout)
@@ -834,7 +840,7 @@ def systemctl_list(host: Optional[str] = None, state: Optional[str] = None) -> d
 
 @_tool
 def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200,
-              use_sudo: bool = False) -> dict:
+              use_sudo: bool = False, offset_bytes: int = 0) -> dict:
     """
     Read the contents of a file on a remote host over SSH (SFTP).
 
@@ -847,6 +853,9 @@ def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200,
         use_sudo: If True, read via 'sudo cat' instead of SFTP. Use for root-owned
                   files that the SSH user cannot access directly. Requires passwordless
                   sudo on the target host.
+        offset_bytes: Byte offset to seek to before reading (default 0 = start of file).
+                      Use stat_file to get file size, then compute offset from grep line
+                      numbers to reach content near the end of large files.
     """
     try:
         _check_secret_path(path)
@@ -887,10 +896,14 @@ def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200,
         client.connect(**connect_kwargs)
         sftp = client.open_sftp()
         with sftp.file(path, "r") as f:
+            if offset_bytes:
+                f.seek(offset_bytes)
             raw = f.read(max_bytes if max_bytes else -1)
         sftp.close()
         content = raw.decode("utf-8", errors="replace")
         result: dict[str, Any] = {"content": content, "host": host_name, "path": path}
+        if offset_bytes:
+            result["offset_bytes"] = offset_bytes
         if max_bytes and len(raw) == max_bytes:
             result["truncated"] = True
         return result
