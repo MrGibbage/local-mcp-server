@@ -200,7 +200,7 @@ def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60) -> dict[str, Any]
         # Wrap with remote timeout so the process tree is killed server-side.
         # The paramiko channel timeout is set slightly higher so recv_exit_status
         # sees the normal timeout exit rather than raising a socket timeout.
-        wrapped = f"timeout --kill-after=5 {timeout} bash -c {shlex.quote(command)}"
+        wrapped = f"timeout -k 5 {timeout} sh -c {shlex.quote(command)}"
         t0 = time.monotonic()
         _, stdout, stderr = client.exec_command(wrapped, timeout=timeout + 15)
         exit_code = stdout.channel.recv_exit_status()
@@ -240,6 +240,15 @@ def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60) -> dict[str, Any]
 
 def _run(host: str | None, command: str, timeout: int = 60) -> dict[str, Any]:
     """Resolve host, run command, return result dict."""
+    for pattern in _SECRET_PATH_PATTERNS:
+        if pattern.search(command):
+            return {
+                "stdout": "",
+                "stderr": "",
+                "exit_code": 1,
+                "error": f"blocked: command targets a secret path. "
+                         "Credential files must not be accessed via ssh_exec.",
+            }
     host_name, host_cfg = _resolve_host(host)
     result = _ssh_exec(host_cfg, command, timeout=timeout)
     result["host"] = host_name
