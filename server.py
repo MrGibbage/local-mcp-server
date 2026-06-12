@@ -16,7 +16,7 @@ import shlex
 import stat as _stat
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote as _url_quote
@@ -36,20 +36,39 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "config.yaml")
 
 
+CONFIG: dict = {}
+_config_mtime: float = 0.0
+
+
 def _load_config() -> dict:
+    """Return the parsed config, reloading from disk only when its mtime changes.
+
+    This lets config.yaml edits take effect on the next tool call without a
+    container restart. Tokens are still read from os.environ and require a
+    restart to pick up changes — that is expected.
+    """
+    global CONFIG, _config_mtime
     path = Path(CONFIG_PATH)
     if not path.exists():
-        print(f"ERROR: config file not found at {path.resolve()}", file=sys.stderr)
-        sys.exit(1)
-    with open(path) as f:
-        return yaml.safe_load(f)
+        if not CONFIG:
+            print(f"ERROR: config file not found at {path.resolve()}", file=sys.stderr)
+            sys.exit(1)
+        return CONFIG  # transient disappearance mid-edit — keep last good config
+    mtime = path.stat().st_mtime
+    if mtime != _config_mtime:
+        with open(path) as f:
+            CONFIG = yaml.safe_load(f) or {}
+        _config_mtime = mtime
+    return CONFIG
 
 
-CONFIG: dict = _load_config()
+CONFIG = _load_config()
 
 _server_cfg = CONFIG.get("server", {})
 HOST: str = _server_cfg.get("host", "0.0.0.0")
 PORT: int = int(_server_cfg.get("port", 8080))
+# default_host and ssh_command_allowlist are re-read live from CONFIG at call
+# time (see _resolve_host / _check_allowlist) so config.yaml edits hot-reload.
 DEFAULT_HOST: str | None = CONFIG.get("default_host")
 ALLOWLIST: list[str] | None = CONFIG.get("ssh_command_allowlist")  # None = unrestricted
 
@@ -123,10 +142,11 @@ def _tool(fn):
 
 def _resolve_host(host: str | None) -> tuple[str, dict]:
     """Return (host_name, host_config_dict), falling back to default_host."""
-    name = host or DEFAULT_HOST
+    cfg = _load_config()
+    name = host or cfg.get("default_host")
     if name is None:
         raise ValueError("No host specified and no default_host configured.")
-    hosts: dict = CONFIG.get("hosts", {})
+    hosts: dict = cfg.get("hosts", {})
     if name not in hosts:
         available = list(hosts.keys())
         raise ValueError(f"Host '{name}' not found in config. Available: {available}")
@@ -139,10 +159,11 @@ def _check_allowlist(command: str, host_cfg: dict | None = None) -> None:
     Merges the global ssh_command_allowlist with any host-level
     ssh_command_allowlist defined in the host's config block.
     """
+    global_allow: list[str] | None = _load_config().get("ssh_command_allowlist")
     host_extra: list[str] = (host_cfg or {}).get("ssh_command_allowlist", [])
-    if ALLOWLIST is None and not host_extra:
+    if global_allow is None and not host_extra:
         return
-    effective: list[str] = (ALLOWLIST or []) + host_extra
+    effective: list[str] = (global_allow or []) + host_extra
     first_token = command.strip().split()[0] if command.strip() else ""
     base = first_token.split("/")[-1]
     if base not in effective:
@@ -262,7 +283,7 @@ def _run(host: str | None, command: str, timeout: int = 60) -> dict[str, Any]:
 
 def _resolve_proxmox_node(host: str) -> dict:
     """Return node config dict for a given name or IP address."""
-    nodes = CONFIG.get("proxmox_nodes", [])
+    nodes = _load_config().get("proxmox_nodes", [])
     if not nodes:
         raise ValueError("proxmox_nodes not configured in config.yaml")
     for node in nodes:
@@ -321,9 +342,10 @@ def _proxmox_wait_task(node_cfg: dict, upid: str, timeout: int = 60) -> dict:
 @_tool
 def list_hosts() -> dict:
     """Return all configured hosts so the model knows what targets are available."""
-    hosts = CONFIG.get("hosts", {})
+    cfg = _load_config()
+    hosts = cfg.get("hosts", {})
     return {
-        "default_host": DEFAULT_HOST,
+        "default_host": cfg.get("default_host"),
         "hosts": {
             name: {
                 "hostname": cfg.get("hostname"),
@@ -2039,7 +2061,7 @@ def proxmox_vm_stop(host: str, vmid: int, confirmed: bool = False) -> dict:
 
 def _loki_cfg() -> str:
     """Return Loki base URL from config."""
-    url = CONFIG.get("loki", {}).get("url", "").rstrip("/")
+    url = _load_config().get("loki", {}).get("url", "").rstrip("/")
     if not url:
         raise ValueError("loki config missing — set loki.url in config.yaml")
     return url
@@ -2118,7 +2140,7 @@ _CF_API_BASE = "https://api.cloudflare.com/client/v4"
 
 def _opnsense_api(method: str, path: str, **kwargs) -> dict:
     """Make an authenticated OPNsense API request. Returns parsed JSON."""
-    cfg = CONFIG.get("opnsense", {})
+    cfg = _load_config().get("opnsense", {})
     base_url = cfg.get("url", "").rstrip("/")
     api_key = os.environ.get("OPNSENSE_API_KEY", "")
     api_secret = os.environ.get("OPNSENSE_API_SECRET", "")
@@ -2371,7 +2393,7 @@ def opnsense_list_dhcp_leases(search: Optional[str] = None) -> dict:
 
 def _cf_tunnel_cfg() -> tuple[str, str, dict]:
     """Return (account_id, tunnel_id, headers) for Cloudflare Tunnel API calls."""
-    cfg = CONFIG.get("cloudflare", {})
+    cfg = _load_config().get("cloudflare", {})
     account_id = cfg.get("account_id", "")
     tunnel_id = cfg.get("tunnel_id", "")
     token = os.environ.get("CLOUDFLARE_TUNNEL_API_TOKEN", "")
@@ -2385,7 +2407,7 @@ def _cf_tunnel_cfg() -> tuple[str, str, dict]:
 
 def _cf_access_cfg() -> tuple[str, dict]:
     """Return (account_id, headers) for Cloudflare Access API calls."""
-    cfg = CONFIG.get("cloudflare", {})
+    cfg = _load_config().get("cloudflare", {})
     account_id = cfg.get("account_id", "")
     token = os.environ.get("CLOUDFLARE_ACCESS_API_TOKEN", "")
     if not (account_id and token):
@@ -2676,13 +2698,313 @@ def cloudflare_add_access_policy(
 
 
 # ---------------------------------------------------------------------------
+# Tools — Home Assistant (uses REST API)
+# ---------------------------------------------------------------------------
+
+
+def _ha_request(method: str, path: str, **kwargs) -> _requests.Response:
+    """Make an authenticated Home Assistant REST API request.
+
+    Base URL is read from the 'homeassistant' api_services entry in config.yaml;
+    the bearer token is read from HA_TOKEN in the environment (never config).
+    Follows the same direct-HTTP pattern as the Proxmox tools rather than the
+    homelab_api_* proxy. Returns the raw requests.Response (caller parses).
+    """
+    svc = _load_config().get("api_services", {}).get("homeassistant", {})
+    base_url = svc.get("base_url", "").rstrip("/")
+    if not base_url:
+        raise ValueError(
+            "homeassistant.base_url not configured under api_services in config.yaml"
+        )
+    token = os.environ.get("HA_TOKEN", "")
+    if not token:
+        raise ValueError(
+            "HA_TOKEN is not set in the environment. "
+            "Add it to .env on docker-server and restart the container."
+        )
+    headers = {"Authorization": f"Bearer {token}"}
+    if method.upper() == "POST":
+        headers["Content-Type"] = "application/json"
+    resp = _requests.request(method, f"{base_url}{path}", headers=headers, timeout=15, **kwargs)
+    resp.raise_for_status()
+    return resp
+
+
+@_tool
+def ha_get_states(domain: Optional[str] = None) -> dict:
+    """
+    Fetch entity states from Home Assistant, optionally filtered to one domain.
+
+    Returns a list of {entity_id, state, attributes, last_changed} for every
+    entity (or only those whose entity_id starts with "<domain>." when domain
+    is given).
+
+    Args:
+        domain: Optional domain prefix to filter by, e.g. "light", "switch",
+                "timer", "sensor", "climate". Omit to return all entities.
+    """
+    try:
+        resp = _ha_request("GET", "/states")
+        states = resp.json()
+        if domain:
+            prefix = f"{domain}."
+            states = [s for s in states if str(s.get("entity_id", "")).startswith(prefix)]
+        entities = [
+            {
+                "entity_id": s.get("entity_id"),
+                "state": s.get("state"),
+                "attributes": s.get("attributes", {}),
+                "last_changed": s.get("last_changed"),
+            }
+            for s in states
+        ]
+        return {"ok": True, "count": len(entities), "entities": entities}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@_tool
+def ha_get_state(entity_id: str) -> dict:
+    """
+    Fetch the full state of a single Home Assistant entity, including attributes.
+
+    Args:
+        entity_id: Full entity id, e.g. "light.kitchen" or "timer.laundry".
+    """
+    try:
+        resp = _ha_request("GET", f"/states/{_url_quote(entity_id)}")
+        return {"ok": True, "state": resp.json()}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc), "entity_id": entity_id}
+
+
+@_tool
+def ha_call_service(
+    domain: str,
+    service: str,
+    data: Optional[dict] = None,
+    confirmed: bool = False,
+) -> dict:
+    """
+    Call any Home Assistant service — the universal control tool.
+
+    Use this to turn lights/switches on or off, start/cancel timers, set climate,
+    run scripts, etc. The (domain, service) pair maps to POST /services/<domain>/<service>
+    and `data` is the service-call payload (e.g. {"entity_id": "light.kitchen"}).
+
+    Requires confirmed=True — only set this after the user has explicitly approved
+    this specific action in the current conversation. If confirmed=False (default)
+    no request is made.
+
+    Args:
+        domain: Service domain, e.g. "light", "switch", "timer", "climate", "script".
+        service: Service name, e.g. "turn_on", "turn_off", "start", "set_temperature".
+        data: Service data dict, typically including "entity_id". Optional.
+        confirmed: Must be True to execute. Default False blocks the action.
+    """
+    if not confirmed:
+        return {
+            "ok": False,
+            "error": (
+                "Set confirmed=True only after the user explicitly approves this "
+                "Home Assistant service call in the current conversation."
+            ),
+            "domain": domain,
+            "service": service,
+        }
+    try:
+        resp = _ha_request("POST", f"/services/{domain}/{service}", json=data or {})
+        try:
+            result = resp.json()
+        except ValueError:
+            result = resp.text
+        return {"ok": True, "domain": domain, "service": service, "result": result}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "domain": domain, "service": service}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc), "domain": domain, "service": service}
+
+
+@_tool
+def ha_render_template(template: str) -> dict:
+    """
+    Render a Home Assistant Jinja2 template and return the resulting string.
+
+    Useful for computed values and formatting, e.g.
+    "{{ states('sensor.outside_temp') }}" or
+    "{{ state_attr('climate.living_room', 'temperature') }}".
+
+    Args:
+        template: A Home Assistant Jinja2 template string.
+    """
+    try:
+        resp = _ha_request("POST", "/template", json={"template": template})
+        return {"ok": True, "result": resp.text}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@_tool
+def ha_get_history(entity_id: str, hours: int = 24) -> dict:
+    """
+    Return state-change history for one entity over the last N hours.
+
+    Attributes are trimmed from the results (minimal_response + no_attributes)
+    to keep responses small — each entry is just {state, last_changed}.
+
+    Args:
+        entity_id: Full entity id, e.g. "sensor.outside_temp".
+        hours: How many hours of history to fetch (default 24).
+    """
+    try:
+        start = datetime.now(timezone.utc) - timedelta(hours=max(int(hours), 1))
+        params = {
+            "filter_entity_id": entity_id,
+            "minimal_response": "true",
+            "no_attributes": "true",
+        }
+        resp = _ha_request(
+            "GET", f"/history/period/{_url_quote(start.isoformat())}", params=params
+        )
+        data = resp.json()
+        # Response is a list of per-entity series; flatten to a single change list.
+        changes = []
+        for series in data:
+            for entry in series:
+                changes.append({
+                    "state": entry.get("state"),
+                    "last_changed": entry.get("last_changed") or entry.get("last_updated"),
+                })
+        return {
+            "ok": True,
+            "entity_id": entity_id,
+            "hours": hours,
+            "count": len(changes),
+            "history": changes,
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "entity_id": entity_id}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc), "entity_id": entity_id}
+
+
+@_tool
+def ha_get_logbook(hours: int = 4) -> dict:
+    """
+    Return recent Home Assistant logbook entries — what happened and when.
+
+    Results are capped at 200 entries to keep responses manageable.
+
+    Args:
+        hours: How many hours back to fetch (default 4).
+    """
+    try:
+        start = datetime.now(timezone.utc) - timedelta(hours=max(int(hours), 1))
+        resp = _ha_request("GET", f"/logbook/{_url_quote(start.isoformat())}")
+        data = resp.json()
+        entries = [
+            {
+                "when": e.get("when"),
+                "name": e.get("name"),
+                "message": e.get("message"),
+                "entity_id": e.get("entity_id"),
+                "domain": e.get("domain"),
+            }
+            for e in data
+        ]
+        capped = entries[-200:]
+        return {
+            "ok": True,
+            "hours": hours,
+            "count": len(capped),
+            "total": len(entries),
+            "entries": capped,
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@_tool
+def ha_list_automations() -> dict:
+    """
+    List all Home Assistant automations with their on/off state and friendly name.
+
+    Returns entity_id, friendly_name, state ("on"/"off"), and last_triggered for
+    every automation.* entity.
+    """
+    try:
+        resp = _ha_request("GET", "/states")
+        states = resp.json()
+        automations = [
+            {
+                "entity_id": s.get("entity_id"),
+                "friendly_name": s.get("attributes", {}).get("friendly_name"),
+                "state": s.get("state"),
+                "last_triggered": s.get("attributes", {}).get("last_triggered"),
+            }
+            for s in states
+            if str(s.get("entity_id", "")).startswith("automation.")
+        ]
+        return {"ok": True, "count": len(automations), "automations": automations}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@_tool
+def ha_trigger_automation(automation_id: str, confirmed: bool = False) -> dict:
+    """
+    Trigger a Home Assistant automation by entity id (runs its actions now).
+
+    Calls POST /services/automation/trigger with the given entity_id. Requires
+    confirmed=True — only set this after the user has explicitly approved
+    triggering this automation in the current conversation.
+
+    Args:
+        automation_id: Automation entity id, e.g. "automation.morning_lights".
+        confirmed: Must be True to execute. Default False blocks the action.
+    """
+    if not confirmed:
+        return {
+            "ok": False,
+            "error": (
+                "Set confirmed=True only after the user explicitly approves "
+                "triggering this automation."
+            ),
+            "automation_id": automation_id,
+        }
+    try:
+        resp = _ha_request(
+            "POST", "/services/automation/trigger", json={"entity_id": automation_id}
+        )
+        try:
+            result = resp.json()
+        except ValueError:
+            result = resp.text
+        return {"ok": True, "automation_id": automation_id, "result": result}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "automation_id": automation_id}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc), "automation_id": automation_id}
+
+
+# ---------------------------------------------------------------------------
 # Tools — Homelab API proxy
 # ---------------------------------------------------------------------------
 
 
 def _api_svc_cfg(service: str) -> dict:
     """Resolve config for a named api_service. Raises ValueError on misconfiguration."""
-    services = CONFIG.get("api_services", {})
+    services = _load_config().get("api_services", {})
     if service not in services:
         available = sorted(services.keys())
         raise ValueError(f"Unknown service '{service}'. Available: {available}")
