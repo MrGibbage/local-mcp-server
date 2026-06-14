@@ -116,7 +116,11 @@ log = _setup_logging()
 # FastMCP initialisation
 # ---------------------------------------------------------------------------
 
-mcp = FastMCP("Homelab MCP", host=HOST, port=PORT, auth=None)
+# stateless_http=True drops the Mcp-Session-Id handshake. Claude Code's
+# Streamable HTTP client works fine without it, and dropping it fixes the
+# "session not found" interop failure with mark3labs/mcp-go clients
+# (e.g. the Mattermost Agents plugin).
+mcp = FastMCP("Homelab MCP", host=HOST, port=PORT, auth=None, stateless_http=True)
 
 # ---------------------------------------------------------------------------
 # Tool registration filter — MCP_ENABLED_TOOLS
