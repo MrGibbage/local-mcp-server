@@ -2834,6 +2834,64 @@ def ha_call_service(
 
 
 @_tool
+def ha_light_control(
+    entity_id: str,
+    action: str,
+    brightness_pct: Optional[int] = None,
+) -> dict:
+    """
+    Turn a whitelisted Home Assistant light on, off, or toggle it.
+
+    A deliberately narrow, safe control tool for untrusted/automated callers
+    (e.g. the Mattermost bot). Unlike ha_call_service, it can ONLY:
+      - act on the "light" domain, and
+      - act on entity_ids listed in `ha_light_allowlist` in config.yaml.
+    Anything else is rejected. There is no `confirmed` gate — the allowlist IS
+    the safety boundary, so the bot can act on approved lights directly.
+
+    Args:
+        entity_id: A light entity, e.g. "light.office_lamps". Must appear in
+                   ha_light_allowlist in config.yaml or the call is refused.
+        action: "on", "off", or "toggle".
+        brightness_pct: Optional 0-100 brightness, applied only with action="on"
+                        on dimmable lights. Ignored for "off"/"toggle".
+    """
+    act = (action or "").strip().lower()
+    if act not in ("on", "off", "toggle"):
+        return {"ok": False, "error": "action must be 'on', 'off', or 'toggle'."}
+    if not entity_id.startswith("light."):
+        return {"ok": False, "error": "ha_light_control only controls 'light.' entities."}
+    allow = _load_config().get("ha_light_allowlist") or []
+    if entity_id not in allow:
+        return {
+            "ok": False,
+            "error": f"'{entity_id}' is not in ha_light_allowlist; refusing.",
+            "allowed": allow,
+        }
+    service = {"on": "turn_on", "off": "turn_off", "toggle": "toggle"}[act]
+    data: dict = {"entity_id": entity_id}
+    if act == "on" and brightness_pct is not None:
+        try:
+            pct = int(brightness_pct)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "brightness_pct must be an integer 0-100."}
+        if not 0 <= pct <= 100:
+            return {"ok": False, "error": "brightness_pct must be between 0 and 100."}
+        data["brightness_pct"] = pct
+    try:
+        resp = _ha_request("POST", f"/services/light/{service}", json=data)
+        try:
+            result = resp.json()
+        except ValueError:
+            result = resp.text
+        return {"ok": True, "entity_id": entity_id, "action": act, "result": result}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "entity_id": entity_id}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc), "entity_id": entity_id}
+
+
+@_tool
 def ha_render_template(template: str) -> dict:
     """
     Render a Home Assistant Jinja2 template and return the resulting string.
