@@ -10,7 +10,26 @@
       "mcp__homelab-mcp__list_directory",
       "mcp__homelab-mcp__docker_ps",
       "mcp__homelab-mcp__bookstack_search",
-      "mcp__homelab-mcp__bookstack_read_page"
+      "mcp__homelab-mcp__bookstack_read_page",
+      "mcp__homelab-mcp__stat_file",
+      "mcp__homelab-mcp__homelab_api_get",
+      "mcp__homelab-mcp__grep_file",
+      "mcp__homelab-mcp__ha_get_states",
+      "mcp__homelab-mcp__list_hosts",
+      "mcp__homelab-mcp__opnsense_list_dhcp_leases",
+      "mcp__homelab-mcp__loki_query",
+      "mcp__homelab-mcp__tail_file",
+      "mcp__homelab-mcp__disk_usage",
+      "mcp__homelab-mcp__memory_usage",
+      "mcp__homelab-mcp__systemctl_status",
+      "mcp__homelab-mcp__proxmox_vm_list",
+      "mcp__homelab-mcp__ha_get_state",
+      "mcp__homelab-mcp__validate_config",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(mkdir *)",
+      "mcp__homelab-mcp__backup_file",
+      "mcp__homelab-mcp__make_directory"
     ]
   },
   "hooks": {
