@@ -23,29 +23,126 @@ cp config.example.yaml config.yaml
 This is what lets `config.yaml` be safe to read in a session while secrets stay
 out of context entirely. See [security.md](security.md).
 
-## Hosts
+## Minimum configuration
 
-Each host you want to manage is one block:
+Almost everything is optional. To do anything useful (run commands or read files
+over SSH) you need just a host and a default:
 
 ```yaml
-default_host: docker-server   # used when a tool is called without a host argument
-
+default_host: docker-server
 hosts:
   docker-server:
-    hostname: 192.168.1.100   # IP or resolvable name
-    user: myuser
-    key_path: /keys/id_rsa    # path INSIDE the container (./keys is mounted to /keys)
-    # port: 22                # optional
-
-  nas:
-    hostname: 192.168.1.101
+    hostname: 192.168.1.100
     user: myuser
     key_path: /keys/id_rsa
 ```
 
+That's the whole minimum. The `server:` block is optional (defaults to
+`0.0.0.0:8080`), and every integration — `proxmox_nodes`, `loki`, `opnsense`,
+`cloudflare`, `api_services`, `ha_light_allowlist` — is purely opt-in. Add a
+block only when you want those tools to actually work.
+
+The one hard requirement is that the file **exists**: if `config.yaml` is
+missing entirely, the server refuses to start. An empty-but-present file boots.
+
+### What happens when a block is missing
+
+Integration blocks are read **lazily**, at the moment a tool is called — not at
+startup. So leaving out a block you don't use costs nothing:
+
+- The server starts normally regardless of which blocks are present.
+- A tool whose block is missing **still appears** in the tool list, but returns
+  a clear error *only if it is actually called* — e.g. calling `loki_query`
+  without a `loki:` block returns `loki config missing — set loki.url in
+  config.yaml`. Nothing crashes; every other tool keeps working.
+
+If you'd rather not advertise tools you can't use (so the model never sees them),
+restrict each instance with the `MCP_ENABLED_TOOLS` allowlist — see
+[Deployment profiles](#deployment-profiles).
+
+## Hosts
+
+Each SSH host you want to manage is one block under `hosts:`. **The block's key
+is its name** — the string you (or the model) pass as the `host` argument to a
+tool. Names are arbitrary; pick whatever is memorable. With four Docker hosts,
+give each a distinct, descriptive key:
+
+```yaml
+default_host: docker1         # used when a tool is called without a host argument
+
+hosts:
+  docker1:
+    hostname: 192.168.1.100   # IP or resolvable name
+    user: myuser
+    key_path: /keys/id_rsa    # path INSIDE the container (./keys is mounted to /keys)
+    # port: 22                # optional
+  docker2:
+    hostname: 192.168.1.101
+    user: myuser
+    key_path: /keys/id_rsa
+  docker3:
+    hostname: 192.168.1.102
+    user: myuser
+    key_path: /keys/id_rsa
+  docker4:
+    hostname: 192.168.1.103
+    user: myuser
+    key_path: /keys/id_rsa
+```
+
+A tool then targets one by name: `docker_ps(host="docker3")`. Omitting the
+argument falls back to `default_host`. Hosts can share one key (`key_path`) or
+each use a different one — the keys just need to live in `./keys/`.
+
 SSH private keys live in `./keys/` on the host, mounted **read-only** into the
 container at `/keys/`. The matching public key must be in
 `~/.ssh/authorized_keys` on each target host.
+
+## Proxmox nodes — naming with multiple servers
+
+Proxmox is configured separately under `proxmox_nodes:` (a **list**, not a map),
+because each node also needs an API token. With six Proxmox servers you get six
+list entries. Each entry has three name-related fields, and getting them right
+matters:
+
+```yaml
+proxmox_nodes:
+  - name: pve1          # logical name + ENV VAR PREFIX -> PVE1_API_TOKEN
+    host: 192.168.1.10  # API address (https://<host>:8006)
+    node: pve1          # the PVE node name as it appears in Proxmox itself
+  - name: pve2
+    host: 192.168.1.11
+    node: pve2
+  - name: pve3
+    host: 192.168.1.12
+    node: pve3
+  # ... pve4, pve5, pve6
+```
+
+| Field | What it is | Rules |
+|---|---|---|
+| `name` | The name you pass to a tool (`proxmox_vm_list(host="pve3")`), **and** the prefix of the token env var | Must be unique. Use only letters, digits, and underscores |
+| `host` | IP/hostname the API is reached at | Must be unique per physical server |
+| `node` | The node name *inside* Proxmox (shown in the web UI / used in API paths) | Usually equals the PVE hostname; may differ from `name` |
+
+**The token env var is derived from `name`, upper-cased, plus `_API_TOKEN`.** So
+`name: pve3` looks for `PVE3_API_TOKEN` in the environment. Each of the six nodes
+needs its own:
+
+```bash
+PVE1_API_TOKEN=user@pam!tokenid=uuid-secret
+PVE2_API_TOKEN=user@pam!tokenid=uuid-secret
+# ... through PVE6_API_TOKEN
+```
+
+> **Gotcha:** because `name` becomes a shell env var name, avoid hyphens or dots
+> in it — `name: pve-01` would map to the invalid env var `PVE-01_API_TOKEN`.
+> Stick to `pve1`, `pve_dc1`, etc. The `node:` field has no such restriction, so
+> put the real Proxmox node name there.
+
+A tool resolves a node by matching the `host` argument against **either** `name`
+**or** `host`, so `proxmox_vm_list(host="pve3")` and
+`proxmox_vm_list(host="192.168.1.12")` both work.
 
 ## The homelab API proxy — extensibility in one block
 
