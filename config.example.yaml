@@ -1,6 +1,12 @@
 # Homelab MCP Server — example configuration
 # Copy this to config.yaml and fill in your values.
 # config.yaml is gitignored so secrets stay local.
+#
+# DESIGN RULE: config.yaml holds NON-secret routing info only — hostnames,
+# usernames, URLs, key *paths*, allowlists. Every secret (API key, token,
+# password, SSH key contents) is read from an environment variable, never from
+# this file. That is what keeps credentials out of the model's context.
+# See docs/security.md and docs/configuration.md.
 
 server:
   host: "0.0.0.0"   # bind address — keep this LAN-only, never expose to internet
@@ -9,6 +15,9 @@ server:
 # The host used when a tool is called without an explicit host argument.
 default_host: docker-server
 
+# ---------------------------------------------------------------------------
+# SSH hosts. Private keys live in ./keys/ and are mounted read-only at /keys/.
+# ---------------------------------------------------------------------------
 hosts:
   docker-server:
     hostname: 192.168.1.100   # IP or resolvable hostname
@@ -20,45 +29,15 @@ hosts:
     hostname: 192.168.1.101
     user: myuser
     key_path: /keys/id_rsa
-
-  proxmox:
-    hostname: 192.168.1.102
-    user: root
-    key_path: /keys/id_rsa_proxmox
+    # Optional per-host allowlist, merged with the global one below.
+    # ssh_command_allowlist:
+    #   - zpool
+    #   - zfs
 
   vm1:
     hostname: 192.168.1.103
     user: myuser
     key_path: /keys/id_rsa
-
-  mediaserver:
-    hostname: 192.168.1.104
-    user: myuser
-    key_path: /keys/id_rsa
-
-# OPNsense firewall/router API integration.
-# Used by caddy_* and opnsense_* tools.
-# Create an API key at System → Access → Users → your user → API keys.
-# Scope the key to: Caddy plugin + DHCP (read).
-opnsense:
-  url: "https://192.168.0.1"      # OPNsense web UI address
-  api_key: "your-api-key"
-  api_secret: "your-api-secret"
-
-# Cloudflare integration — two scoped API tokens (never share them).
-# Create tokens at: dash.cloudflare.com → My Profile → API Tokens.
-cloudflare:
-  account_id: "your-account-id"            # Cloudflare account ID
-  tunnel_id: "your-tunnel-id"              # Zero Trust → Networks → Tunnels
-  tunnel_api_token: "your-tunnel-token"    # Permission: Cloudflare Tunnel: Edit
-  access_api_token: "your-access-token"   # Permission: Access: Apps and Policies: Edit
-
-# BookStack documentation wiki integration.
-# Used by the bookstack_* tools to read and update wiki pages via the REST API.
-bookstack:
-  url: "https://bookstack.example.com"   # base URL, no trailing slash
-  token_id: "your-token-id"              # API token ID from BookStack profile
-  token_secret: "your-token-secret"      # API token secret
 
 # Optional: restrict which base commands ssh_exec is allowed to run.
 # Comment out this block (or set to null) to allow all commands.
@@ -74,24 +53,71 @@ bookstack:
 #   - journalctl
 
 # ---------------------------------------------------------------------------
-# Homelab API proxy — credentials come from env vars in .env, never here.
-# Add a new service: append a block, add the env var to .env, restart.
+# Proxmox nodes — used by the proxmox_* tools.
+# For each node, the API token is read from an env var named <NAME>_API_TOKEN
+# (the name field, upper-cased). e.g. name: proxmox1 -> PROXMOX1_API_TOKEN.
+# Create the token at: Datacenter -> Permissions -> API Tokens.
+# ---------------------------------------------------------------------------
+proxmox_nodes:
+  - name: proxmox1                  # logical name + env var prefix
+    host: 192.168.1.102             # API host (https://<host>:8006)
+    node: pve                       # PVE node name used in API paths
+    # token via env: PROXMOX1_API_TOKEN="user@pam!tokenid=uuid-secret"
+
+# ---------------------------------------------------------------------------
+# OPNsense firewall/router API — used by caddy_* and opnsense_* tools.
+# Create an API key at System -> Access -> Users -> your user -> API keys.
+# Scope it to: Caddy plugin + DHCP (read).
+# Secrets come from env: OPNSENSE_API_KEY / OPNSENSE_API_SECRET.
+# ---------------------------------------------------------------------------
+opnsense:
+  url: "https://192.168.1.1"        # OPNsense web UI address
+
+# ---------------------------------------------------------------------------
+# Cloudflare — used by cloudflare_* tools.
+# Secrets come from env: CLOUDFLARE_TUNNEL_API_TOKEN (Tunnel: Edit) and
+# CLOUDFLARE_ACCESS_API_TOKEN (Access: Apps and Policies: Edit).
+# ---------------------------------------------------------------------------
+cloudflare:
+  account_id: "your-account-id"     # Cloudflare account ID
+  tunnel_id: "your-tunnel-id"       # Zero Trust -> Networks -> Tunnels
+
+# ---------------------------------------------------------------------------
+# Loki — used by loki_query.
+# ---------------------------------------------------------------------------
+loki:
+  url: "http://192.168.1.100:3100"
+
+# ---------------------------------------------------------------------------
+# Home Assistant light allowlist — ha_light_control will ONLY act on the
+# entity_ids listed here. Any other entity is refused.
+# ---------------------------------------------------------------------------
+ha_light_allowlist:
+  - light.living_room
+  - light.kitchen
+
+# ---------------------------------------------------------------------------
+# Homelab API proxy — credentials come from env vars, never here.
+# Add a new service: append a block, add the env var to your env file, restart.
 # To verify a new service: homelab_api_get("<service>", "/system/status")
 # ---------------------------------------------------------------------------
-
 api_services:
 
-  # --- Example: Radarr on smavm ---
+  # --- Home Assistant — used by all ha_* tools. Token from env: HA_TOKEN ---
+  homeassistant:
+    base_url: http://192.168.1.105:8123
+
+  # --- Radarr (custom header auth) ---
   radarr:
     base_url: http://192.168.1.100:7878/api/v3
     auth_style: header        # header | bearer | token | query_param
     auth_header: X-Api-Key    # used when auth_style: header
-    auth_env: RADARR_API_KEY  # env var name in .env
-    post_allowlist:
+    auth_env: RADARR_API_KEY  # env var holding the key
+    post_allowlist:           # POST denied unless the path is listed here
       - /command              # trigger rescan, refresh, search
-      - /movie/editor         # bulk edit (tag/monitor only — no delete key in body)
+      - /movie/editor         # bulk edit (tag/monitor only)
 
-  # --- Example: SABnzbd (uses query_param auth) ---
+  # --- SABnzbd (query_param auth) ---
   sabnzbd:
     base_url: http://192.168.1.100:8080
     auth_style: query_param
@@ -99,9 +125,10 @@ api_services:
     auth_env: SABNZBD_API_KEY
     # No post_allowlist — SABnzbd uses GET ?mode= for everything
 
-  # --- Example: Grafana (bearer token, read-only via Claude) ---
+  # --- Grafana (bearer token, read-only via Claude) ---
   grafana:
     base_url: http://192.168.1.101:3000/api
     auth_style: bearer
     auth_env: GRAFANA_API_TOKEN
     # No post_allowlist — writes belong in the UI
+</content>
