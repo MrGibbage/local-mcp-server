@@ -82,5 +82,3 @@ This server was built to run a real, multi-host homelab:
 Each host is one block in `config.yaml`. Nothing about the toolset is hard-wired
 to these specific machines — point the config at your own hosts and the same
 tools operate them.
-</content>
-</invoke>

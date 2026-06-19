@@ -279,4 +279,3 @@ claude mcp add homelab --transport http http://192.168.1.100:8090/mcp
 
 For a token-protected instance, add the header your client supports
 (e.g. `Authorization: Bearer <token>`).
-</content>

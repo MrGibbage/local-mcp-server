@@ -74,4 +74,3 @@ OAuth or dynamic client registration — clients must present a pre-shared token
 - Use the SSH allowlist if any device on your LAN is untrusted.
 - Scope every API token to the minimum the tool needs (read-only where possible).
 - Rotate any credential that appears in a transcript.
-</content>

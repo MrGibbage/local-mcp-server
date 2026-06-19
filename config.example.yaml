@@ -131,4 +131,3 @@ api_services:
     auth_style: bearer
     auth_env: GRAFANA_API_TOKEN
     # No post_allowlist — writes belong in the UI
-</content>

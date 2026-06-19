@@ -101,4 +101,3 @@ sees the key.
 | Tool | Description |
 |---|---|
 | `loki_query` | Query Loki logs with LogQL |
-</content>
