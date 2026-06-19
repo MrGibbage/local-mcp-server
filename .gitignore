@@ -8,6 +8,8 @@ keys/
 .env
 *.env
 .env.*
+# but DO track the committed template
+!.env.example
 
 # Python
 __pycache__/
