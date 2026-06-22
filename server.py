@@ -195,7 +195,13 @@ def _check_secret_path(path: str) -> None:
         if pattern.search(path):
             raise ValueError(
                 f"blocked: '{path}' matches the secret-path guard. "
-                "Credential files must not be read or written through MCP tools."
+                "Credential files must not be read or written through MCP tools. "
+                "To CALL a homelab service API, use the homelab_api_get / "
+                "homelab_api_post / homelab_api_mutate proxy tools — they inject "
+                "the credential server-side from the container env, so the key "
+                "never enters context. If a proxy call returns 'credential env var "
+                "not set', the key is missing from the container's env_file "
+                "(/etc/homelab/homelab-mcp.env) and must be added there, not read here."
             )
 
 
@@ -583,7 +589,7 @@ def docker_exec(container: str, command: str, host: Optional[str] = None) -> dic
         host: Named host from config (defaults to default_host).
     """
     try:
-        result = _run(host, f"docker exec {container} sh -c {repr(command)}")
+        result = _run(host, f"docker exec {container} sh -c {shlex.quote(command)}")
         ok = result["exit_code"] == 0
         return {"ok": ok, "container": container, "host": result["host"],
                 "output": result["stdout"],
