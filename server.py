@@ -551,6 +551,12 @@ def docker_inspect(container: str, format: Optional[str] = None, host: Optional[
         host: Named host from config (defaults to default_host).
     """
     try:
+        # Block format strings that reference .Env — they bypass JSON-path redaction
+        # and return raw env arrays for any container, including those with secrets.
+        if format and _re.search(r'\.Env\b', format):
+            return {"ok": False, "container": container,
+                    "error": "format strings referencing .Env are blocked to prevent secret exposure; "
+                             "use docker_inspect without a format string instead"}
         fmt_flag = f" --format '{format}'" if format else ""
         result = _run(host, f"docker inspect{fmt_flag} {container}")
         ok = result["exit_code"] == 0
@@ -562,10 +568,10 @@ def docker_inspect(container: str, format: Optional[str] = None, host: Optional[
             try:
                 data = json.loads(output)
                 item = data[0] if isinstance(data, list) and len(data) == 1 else data
-                # Redact env vars from the MCP server's own container — they contain secrets.
-                if isinstance(item, dict) and item.get("Name", "").lstrip("/") == "homelab-mcp":
-                    item.get("Config", {}).pop("Env", None)
-                    item["_note"] = "Env redacted for homelab-mcp (contains secrets)"
+                # Redact Config.Env from all containers — any container may carry secrets.
+                if isinstance(item, dict) and isinstance(item.get("Config"), dict):
+                    if item["Config"].pop("Env", None) is not None:
+                        item["_note"] = "Config.Env redacted (may contain secrets)"
                 return {"ok": True, "container": container, "host": result["host"], "data": item}
             except json.JSONDecodeError:
                 pass
