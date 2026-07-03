@@ -3149,6 +3149,38 @@ def _api_build_request(cfg: dict, path: str, params: dict | None) -> tuple[str, 
     return url, headers, params
 
 
+def _api_secrets(cfg: dict) -> list[str]:
+    """Return all resolved credential strings for a service config.
+
+    For basic auth, user and password are returned independently so each is
+    scrubbed separately.  Empty strings are excluded.
+    """
+    token = cfg.get("_token", "")
+    if cfg.get("auth_style") == "basic":
+        parts = token.split(":", 1)
+        return [p for p in parts if p]
+    return [token] if token else []
+
+
+def _api_parse_response(cfg: dict, resp) -> dict:
+    """Parse an upstream HTTP response, scrubbing live credentials from the body.
+
+    Some services echo the caller's own API key or token back in their JSON
+    response body — even on read-only endpoints (confirmed: Seerr /settings/main,
+    ntfy /v1/account).  Scrubbing on the raw text before JSON parsing guarantees
+    the live secret never reaches the MCP caller regardless of which endpoint is
+    called, present or future.
+    """
+    raw = resp.text
+    for secret in _api_secrets(cfg):
+        raw = raw.replace(secret, "[REDACTED-BY-PROXY]")
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = raw
+    return {"ok": resp.ok, "status": resp.status_code, "data": data}
+
+
 @_tool
 def homelab_api_get(service: str, path: str, params: Optional[dict] = None) -> dict:
     """
@@ -3171,11 +3203,7 @@ def homelab_api_get(service: str, path: str, params: Optional[dict] = None) -> d
         cfg = _api_svc_cfg(service)
         url, headers, resolved_params = _api_build_request(cfg, path, params)
         resp = _requests.get(url, headers=headers, params=resolved_params, timeout=15, verify=False)
-        try:
-            data = resp.json()
-        except Exception:
-            data = resp.text
-        return {"ok": resp.ok, "status": resp.status_code, "data": data}
+        return _api_parse_response(cfg, resp)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
@@ -3221,11 +3249,7 @@ def homelab_api_post(service: str, path: str, body: Optional[dict] = None) -> di
         resp = _requests.post(
             url, headers=headers, params=resolved_params, json=body or {}, timeout=15, verify=False
         )
-        try:
-            data = resp.json()
-        except Exception:
-            data = resp.text
-        return {"ok": resp.ok, "status": resp.status_code, "data": data}
+        return _api_parse_response(cfg, resp)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
@@ -3283,11 +3307,7 @@ def homelab_api_mutate(
             resp = _requests.patch(
                 url, headers=headers, params=resolved_params, json=body or {}, timeout=15, verify=False
             )
-        try:
-            data = resp.json()
-        except Exception:
-            data = resp.text
-        return {"ok": resp.ok, "status": resp.status_code, "data": data}
+        return _api_parse_response(cfg, resp)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
