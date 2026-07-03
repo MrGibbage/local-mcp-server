@@ -1680,6 +1680,20 @@ def memory_usage(host: Optional[str] = None) -> dict:
         return {"stdout": "", "stderr": str(exc), "exit_code": -1}
 
 
+@_tool
+def list_crontab(host: Optional[str] = None) -> dict:
+    """
+    List cron jobs from the crontab (read-only).
+
+    Runs `crontab -l` on the target host to show scheduled jobs for the
+    SSH user.  This tool never modifies crontabs.
+    """
+    try:
+        return _run(host, "crontab -l")
+    except ValueError as exc:
+        return {"stdout": "", "stderr": str(exc), "exit_code": -1}
+
+
 # ---------------------------------------------------------------------------
 # Tools — Proxmox (uses REST API)
 # ---------------------------------------------------------------------------
