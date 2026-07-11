@@ -205,12 +205,18 @@ def _check_secret_path(path: str) -> None:
             )
 
 
-def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60) -> dict[str, Any]:
+def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60, wrap: bool = True) -> dict[str, Any]:
     """Open a fresh SSH connection, run command, return stdout/stderr/exit_code.
 
     Wraps the remote command in `timeout --kill-after=5 <N>` so the remote
     process tree is killed if it runs too long, preventing runaway processes
     from blocking the SSH session pool after the MCP call returns.
+
+    wrap=False skips the POSIX wrapper entirely and sends the command as-is.
+    Required for Windows hosts (e.g. ganymede) — their SSH server's default
+    shell is cmd.exe, which cannot parse `sh -c` / `timeout -k`. Only pass
+    wrap=False for known-Windows hosts; there is no server-side kill-after
+    guarantee on that path, just the paramiko channel timeout below.
     """
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -231,7 +237,7 @@ def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60) -> dict[str, Any]
         # Wrap with remote timeout so the process tree is killed server-side.
         # The paramiko channel timeout is set slightly higher so recv_exit_status
         # sees the normal timeout exit rather than raising a socket timeout.
-        wrapped = f"timeout -k 5 {timeout} sh -c {shlex.quote(command)}"
+        wrapped = f"timeout -k 5 {timeout} sh -c {shlex.quote(command)}" if wrap else command
         t0 = time.monotonic()
         _, stdout, stderr = client.exec_command(wrapped, timeout=timeout + 15)
         exit_code = stdout.channel.recv_exit_status()
@@ -281,7 +287,7 @@ def _run(host: str | None, command: str, timeout: int = 60) -> dict[str, Any]:
                          "Credential files must not be accessed via ssh_exec.",
             }
     host_name, host_cfg = _resolve_host(host)
-    result = _ssh_exec(host_cfg, command, timeout=timeout)
+    result = _ssh_exec(host_cfg, command, timeout=timeout, wrap=not host_cfg.get("windows", False))
     result["host"] = host_name
     return result
 
@@ -1336,11 +1342,15 @@ def grep_file(path: str, pattern: str, host: Optional[str] = None, context: int 
         ctx = min(int(context), 5)
         ctx_flag = f" -C {ctx}" if ctx > 0 else ""
         result = _run(host, f"grep -n{ctx_flag} {pattern!r} {path}")
-        if result["exit_code"] == 1:
-            # exit code 1 = no matches (not an error)
+        if result["exit_code"] == 1 and not result["stderr"]:
+            # exit code 1 with empty stderr = no matches (not an error). On
+            # Windows hosts cmd.exe's "not recognized" error also exits 1, but
+            # populates stderr — the stderr check keeps that a real error
+            # instead of a false "no matches" (there is no grep.exe on PATH
+            # on ganymede today, so grep_file will correctly error there).
             return {"matches": [], "match_count": 0, "host": result["host"], "path": path}
         if result["exit_code"] != 0:
-            return {"ok": False, "error": result["stderr"], "host": result["host"], "path": path}
+            return {"ok": False, "error": result["stderr"] or f"grep exited {result['exit_code']}", "host": result["host"], "path": path}
         return {
             "matches": result["stdout"].splitlines(),
             "match_count": len([l for l in result["stdout"].splitlines() if ":" in l]),
@@ -3312,6 +3322,137 @@ def homelab_api_mutate(
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
         return {"ok": False, "error": f"Request failed: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# Tools — Holocron docs repo (git status / sync only, no arbitrary paths)
+# ---------------------------------------------------------------------------
+
+# Deliberately hardcoded here rather than read from config.yaml — the fixed
+# path+command per host IS the safety boundary for these two tools (same
+# model as ha_light_control's entity allowlist). Do not add a path parameter
+# to either tool below; that would defeat the point of this table.
+_HOLOCRON_HOSTS: dict[str, dict[str, Any]] = {
+    "docker-server": {
+        "repo": "/home/skip/holocron",
+        "sync_script": "/home/skip/bin/holocron-sync.sh",
+        "windows": False,
+    },
+    "smavm": {
+        "repo": "/home/skip/holocron",
+        "sync_script": "/home/skip/bin/holocron-sync.sh",
+        "windows": False,
+    },
+    "ganymede": {
+        "repo": r"C:\srv\holocron",
+        "sync_script": r"C:\Users\skip\.claude\hooks\holocron-sync.ps1",
+        "windows": True,
+    },
+}
+
+
+def _resolve_holocron_host(host: str) -> dict[str, Any]:
+    hc = _HOLOCRON_HOSTS.get(host)
+    if hc is None:
+        raise ValueError(
+            f"Unknown holocron host '{host}'. Valid: {list(_HOLOCRON_HOSTS)}"
+        )
+    return hc
+
+
+@_tool
+def holocron_git_status(host: str) -> dict:
+    """
+    Report git status and last-commit age for the holocron docs repo on one host.
+
+    Read-only. Runs a fixed `git status --porcelain` + `git log -1` against a
+    hardcoded holocron clone path for the given host. There is no path
+    parameter — this can only ever inspect the holocron repo, never any other
+    repo (in particular, never the separate .claude/Claude-config repo).
+
+    Args:
+        host: One of "docker-server", "smavm", "ganymede".
+    """
+    try:
+        hc = _resolve_holocron_host(host)
+        _, host_cfg = _resolve_host(host)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "host": host}
+
+    repo = hc["repo"]
+    if hc["windows"]:
+        command = f'git -C "{repo}" status --porcelain && git -C "{repo}" log -1 --format=%cr'
+    else:
+        quoted = shlex.quote(repo)
+        command = f"git -C {quoted} status --porcelain && git -C {quoted} log -1 --format=%cr"
+
+    result = _ssh_exec(host_cfg, command, timeout=20, wrap=not hc["windows"])
+    if result["exit_code"] != 0:
+        return {
+            "ok": False,
+            "error": result.get("error") or result["stderr"] or "git command failed",
+            "host": host,
+        }
+
+    lines = result["stdout"].splitlines()
+    last_commit_age = lines[-1] if lines else None
+    changed_files = lines[:-1] if lines else []
+    return {
+        "ok": True,
+        "host": host,
+        "clean": len(changed_files) == 0,
+        "changed_files": changed_files,
+        "last_commit_age": last_commit_age,
+    }
+
+
+@_tool
+def holocron_sync_push(host: str, confirmed: bool = False) -> dict:
+    """
+    Run the existing holocron sync script in manual mode on one host: add -A,
+    commit, pull --rebase, push. Never constructs git commands directly —
+    shells out to the same script /sync-holocron and holocron-audit's nightly
+    Step 6 already invoke, at a hardcoded path per host.
+
+    Requires confirmed=True — only set this after the user has explicitly
+    approved syncing (pushing) holocron on this specific host in the current
+    conversation. If there is any ambiguity about whether the user confirmed,
+    ask — do not infer.
+
+    Args:
+        host: One of "docker-server", "smavm", "ganymede".
+        confirmed: Must be True to execute. Default False blocks the action.
+    """
+    if not confirmed:
+        return {
+            "ok": False,
+            "error": (
+                "confirmed=False. Describe what will happen (add/commit/pull "
+                "--rebase/push on this host's holocron repo) and ask the user "
+                "to explicitly confirm before calling again with confirmed=True."
+            ),
+            "host": host,
+        }
+    try:
+        hc = _resolve_holocron_host(host)
+        _, host_cfg = _resolve_host(host)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "host": host}
+
+    script = hc["sync_script"]
+    if hc["windows"]:
+        command = f'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{script}"'
+    else:
+        command = shlex.quote(script)
+
+    result = _ssh_exec(host_cfg, command, timeout=90, wrap=not hc["windows"])
+    return {
+        "ok": result["exit_code"] == 0,
+        "host": host,
+        "exit_code": result["exit_code"],
+        "stdout": result["stdout"],
+        "stderr": result["stderr"],
+    }
 
 
 # ---------------------------------------------------------------------------
