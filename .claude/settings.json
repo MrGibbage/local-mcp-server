@@ -29,7 +29,8 @@
       "Bash(git commit *)",
       "Bash(mkdir *)",
       "mcp__homelab-mcp__backup_file",
-      "mcp__homelab-mcp__make_directory"
+      "mcp__homelab-mcp__make_directory",
+      "Bash(awk '{print $2}')"
     ]
   },
   "hooks": {

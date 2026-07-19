@@ -157,27 +157,75 @@ def _resolve_host(host: str | None) -> tuple[str, dict]:
     return name, hosts[name]
 
 
+_CHAIN_OPERATORS = {";", "&&", "||", "&", "|", "|&"}
+
+
+def _command_segments(command: str) -> list[list[str]]:
+    """Split a shell command into its chained/piped sub-command token lists.
+
+    Splits on `;`, `&&`, `||`, `&`, `|` and newlines (all valid shell command
+    separators) so every chained sub-command can be validated individually,
+    not just the leading token of the whole string. Quoting is respected via
+    shlex, so separators inside quotes are not treated as boundaries.
+    """
+    segments: list[list[str]] = []
+    for line in command.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+            lex.whitespace_split = True
+            tokens = list(lex)
+        except ValueError:
+            # Unbalanced quotes etc. — fall back to a naive split so the
+            # command still gets checked rather than silently passing.
+            tokens = line.split()
+        current: list[str] = []
+        for tok in tokens:
+            if tok in _CHAIN_OPERATORS:
+                if current:
+                    segments.append(current)
+                    current = []
+            else:
+                current.append(tok)
+        if current:
+            segments.append(current)
+    return segments
+
+
 def _check_allowlist(command: str, host_cfg: dict | None = None) -> None:
-    """Raise ValueError if the command's first token is not on the allowlist.
+    """Raise ValueError if any chained sub-command's base is not allowlisted.
 
     Merges the global ssh_command_allowlist with any host-level
-    ssh_command_allowlist defined in the host's config block.
+    ssh_command_allowlist defined in the host's config block. The command is
+    split on `;`, `&&`, `||`, `&`, `|`, and newlines first, so `allowed_cmd;
+    anything` can no longer smuggle an unlisted command past validation of
+    just the leading token.
     """
     global_allow: list[str] | None = _load_config().get("ssh_command_allowlist")
     host_extra: list[str] = (host_cfg or {}).get("ssh_command_allowlist", [])
     if global_allow is None and not host_extra:
         return
     effective: list[str] = (global_allow or []) + host_extra
-    first_token = command.strip().split()[0] if command.strip() else ""
-    base = first_token.split("/")[-1]
-    if base not in effective:
-        raise ValueError(
-            f"Command '{base}' is not on the ssh_command_allowlist. "
-            f"Allowed: {effective}"
-        )
+    for segment in _command_segments(command):
+        if not segment:
+            continue
+        base = segment[0].split("/")[-1]
+        if base not in effective:
+            raise ValueError(
+                f"Command '{base}' is not on the ssh_command_allowlist. "
+                f"Allowed: {effective}"
+            )
 
 
 # Sensitive file patterns — these must never be read or written through MCP tools.
+#
+# Two kinds of entries live here:
+#   1. Paths specific to this host/repo (this server's own .env, keys/, etc.)
+#   2. Generic credential-shaped paths that should be caught no matter which
+#      service owns them. New services should fall under (2) automatically —
+#      add a new hardcoded entry only for something that doesn't match any
+#      existing generic pattern.
 _SECRET_PATH_PATTERNS: list[_re.Pattern] = [
     _re.compile(r"/etc/homelab/"),
     _re.compile(r"/srv/local-mcp-server/\.env"),
@@ -186,6 +234,15 @@ _SECRET_PATH_PATTERNS: list[_re.Pattern] = [
     _re.compile(r"\.openclaw/"),
     _re.compile(r"\.ssh/(?!.*\.pub$)"),
     _re.compile(r"/proc/\d+/environ"),
+    # Generic: any directory literally named "secrets" (this repo's own
+    # convention — see skill-add-service-credentials.md / per-service
+    # READMEs — is that secrets/ holds OAuth credentials.json/token.json
+    # and is gitignored; other services on the host follow the same pattern).
+    _re.compile(r"(^|/)secrets/"),
+    # Generic: common credential filenames, regardless of directory.
+    _re.compile(r"(^|/)(credentials|token)\.json$"),
+    _re.compile(r"\.pem$"),
+    _re.compile(r"\.key$"),
 ]
 
 
@@ -250,6 +307,21 @@ def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60, wrap: bool = True
             result["error"] = f"Command timed out after {timeout}s and was terminated."
         elif exit_code == 137:
             result["error"] = f"Command was force-killed after {timeout}s (SIGKILL)."
+        elif not wrap and exit_code == 255 and not out and not err:
+            # Known cmd.exe quirk: `cmd 2>&1 | other` wires 2>&1 to the
+            # pre-pipe stdout handle before the pipe is connected, so if
+            # `cmd` doesn't exist its error text goes nowhere — both streams
+            # come back empty and Windows OpenSSH reports exit 255. This is
+            # not the tool swallowing output; cmd.exe sent zero bytes.
+            result["error"] = (
+                "Empty output with exit_code 255 on a Windows host usually means "
+                "a cmd.exe redirection/pipe ordering issue, not a real command "
+                "result — most commonly `cmd 2>&1 | other`, where cmd.exe binds "
+                "2>&1 to the handle that existed before the pipe was set up, "
+                "silently discarding the error text if the left-hand command "
+                "isn't found. Retry without `2>&1` right before a pipe (drop "
+                "the pipe, or move 2>&1 to the very end of the whole line)."
+            )
         log.log(
             logging.WARNING if timed_out else logging.INFO,
             "ssh_exec timed out" if timed_out else "ssh_exec complete",
