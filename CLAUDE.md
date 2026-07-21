@@ -49,5 +49,15 @@ Never run commands or read files that would expose credentials in context:
 - Edit `server.py` locally in `/srv/local-mcp-server/`
 - Use `patch_file` (not `write_file`) to modify `config.yaml` on docker-server —
   the live file contains real credentials and must not be overwritten
-- After editing `server.py`, rebuild: `docker compose up -d --build`
-- Verify tool count after rebuild with `docker logs homelab-mcp | tail -5`
+- `config.yaml` hot-reloads automatically — it's mtime-checked and re-read on
+  every tool call, so edits (e.g. a temporary `ssh_command_allowlist` addition
+  to test something) take effect on the next call with **no container
+  restart**. This does not apply to env vars (`.env` / `/etc/homelab/*.env`),
+  which are only read at container start.
+- Only `server.py` changes require a rebuild — that's real Python code, it
+  can't hot-reload. After editing it: `docker compose up -d --build`
+- After a rebuild, check `docker logs homelab-mcp | tail -20` for
+  "Application startup complete" and no tracebacks. Startup does **not** log
+  a tool count — to confirm a newly added tool actually registered, call it
+  (a fresh session/reconnect is needed to pick up the new tool in the client's
+  own tool list; the running server has it immediately).
