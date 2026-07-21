@@ -958,6 +958,49 @@ def systemctl_list(host: Optional[str] = None, state: Optional[str] = None) -> d
         return {"ok": False, "error": str(exc)}
 
 
+@_tool
+def kill_pid(pid: int, signal: str = "TERM", host: Optional[str] = None) -> dict:
+    """
+    Send a signal to a single process by numeric PID.
+
+    Deliberately narrower than adding `kill` to the raw ssh_command_allowlist:
+    pid is a validated int (no shell metacharacters, no `$(...)` substitution
+    possible) and must be a real, positive PID — not 0, 1, or negative, which
+    `kill` treats as a broadcast to whole process groups / every process the
+    SSH user owns. There is no pattern-matching form (pkill/killall) — those
+    can silently match nothing (a "safe-looking" pattern giving false
+    confidence, e.g. `pkill -f 'tsx watch src'` when the real command line
+    never contains that literal string) or match more than intended. Identify
+    the exact PID with `ssh_exec` + `ps` first, then kill it here.
+
+    SSH connects as the configured host user, so this can only signal
+    processes that user owns — same blast radius as `docker stop` on an
+    arbitrary container, not a new trust tier.
+
+    Args:
+        pid: Numeric process ID to signal (must already be known — this tool
+             does not search for processes).
+        signal: Signal name, default "TERM". Common: TERM, KILL, HUP, INT.
+        host: Named host from config (defaults to default_host).
+    """
+    try:
+        pid = int(pid)
+        if pid < 2:
+            return {"ok": False, "pid": pid,
+                     "error": "Refusing to signal PID < 2 — 0/1/negative PIDs are "
+                              "broadcast targets (process group / 'every process "
+                              "you own'), not a single process."}
+        sig = signal.strip().upper().removeprefix("SIG")
+        if not _re.fullmatch(r"[A-Z0-9]+", sig):
+            return {"ok": False, "pid": pid, "error": f"Invalid signal name: {signal!r}"}
+        result = _run(host, f"kill -{sig} {pid}")
+        ok = result["exit_code"] == 0
+        return {"ok": ok, "pid": pid, "signal": sig, "host": result["host"],
+                **({"error": result["stderr"] or f"kill exited {result['exit_code']}"} if not ok else {})}
+    except ValueError as exc:
+        return {"ok": False, "pid": pid, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Tools — File I/O
 # ---------------------------------------------------------------------------
@@ -1774,6 +1817,44 @@ def list_crontab(host: Optional[str] = None) -> dict:
         return _run(host, "crontab -l")
     except ValueError as exc:
         return {"stdout": "", "stderr": str(exc), "exit_code": -1}
+
+
+# ---------------------------------------------------------------------------
+# Tools — Media (ffmpeg)
+# ---------------------------------------------------------------------------
+
+
+@_tool
+def ffmpeg_probe(input_path: str, host: Optional[str] = None, timeout: int = 20) -> dict:
+    """
+    Probe a media file or stream URL with ffmpeg and return its stream info.
+
+    Fixed to `ffmpeg -i <input> -t 5 -f null -` — reads up to 5 seconds of the
+    input and discards all output (the null muxer writes nothing anywhere).
+    No arbitrary ffmpeg flags are accepted, so this cannot be turned into a
+    passthrough for ffmpeg's dozens of protocol handlers (http://, rtmp://,
+    tee, etc.) the way a raw ffmpeg allowlist entry could — there is no
+    output destination for it to write to. input_path is shell-quoted, so it
+    is treated as one literal path/URL, not additional flags.
+
+    Useful for checking codec, resolution, and container info on an IPTV
+    stream URL or local media file before committing to a real transcode.
+
+    Args:
+        input_path: Local file path or stream URL (http://, rtmp://, etc.) to probe.
+        host: Named host from config (defaults to default_host).
+        timeout: Seconds before the probe is force-killed (default 20). Covers
+                 slow-to-connect streams; the -t 5 flag bounds actual read time
+                 once connected.
+    """
+    try:
+        _check_secret_path(input_path)
+        cmd = f"ffmpeg -hide_banner -i {shlex.quote(input_path)} -t 5 -f null - 2>&1"
+        result = _run(host, cmd, timeout=timeout)
+        return {"input": input_path, "host": result["host"],
+                "output": result["stdout"], "exit_code": result["exit_code"]}
+    except ValueError as exc:
+        return {"input": input_path, "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
