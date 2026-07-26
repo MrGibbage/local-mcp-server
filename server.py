@@ -1511,31 +1511,33 @@ def stat_file(path: str, host: Optional[str] = None) -> dict:
 def list_directory(path: str, host: Optional[str] = None, all: bool = True,
                    use_sudo: bool = False) -> dict:
     """
-    List the contents of a directory on a remote host with ownership and permission details.
+    List the contents of a directory on a remote host.
 
-    Returns a structured list of entries with name, type, permissions, owner, group,
-    size, and modified time. Use this to check file ownership, find config files, or
-    verify directory contents before reading or writing.
+    Returns a structured list of entries with name, type, permissions, size, and
+    modified time. Uses SFTP (like read_file/stat_file), so it works against
+    Windows hosts too — unlike a shell `ls`, which cmd.exe doesn't have.
 
     Args:
         path: Absolute path to the directory on the remote host.
         host: Named host from config (defaults to default_host).
-        all: Include hidden files (dot-files). Default True.
-        use_sudo: If True, run ls via sudo. Use for directories only accessible
-                  as root (e.g. /var/lib/docker/volumes/). Requires passwordless
-                  sudo on the target host.
+        all: Include hidden files (dot-files). Default True. Ignored with use_sudo
+             (sudo ls always shows everything `ls -la` would).
+        use_sudo: If True, run `ls` via sudo instead of SFTP. Use for directories
+                  only accessible as root (e.g. /var/lib/docker/volumes/) — SFTP
+                  can't sudo. Requires passwordless sudo; Linux hosts only.
+                  Returns resolved owner/group names on this path, unlike the
+                  default SFTP path (see below).
     """
-    try:
-        all_flag = "-la" if all else "-l"
-        sudo_prefix = "sudo " if use_sudo else ""
-        result = _run(host, f"{sudo_prefix}ls {all_flag} --time-style=long-iso {path} 2>&1")
-        ok = result["exit_code"] == 0
-        if not ok:
+    if use_sudo:
+        try:
+            result = _run(host, f"sudo ls -la --time-style=long-iso {path} 2>&1")
+        except ValueError as exc:
+            return {"ok": False, "path": path, "error": str(exc)}
+        if result["exit_code"] != 0:
             return {"ok": False, "path": path, "host": result["host"], "error": result["stdout"]}
 
         entries = []
         for line in result["stdout"].splitlines():
-            # Skip "total N" header line
             if line.startswith("total "):
                 continue
             parts = line.split(None, 8)
@@ -1543,12 +1545,7 @@ def list_directory(path: str, host: Optional[str] = None, all: bool = True,
                 continue
             perms, _, owner, group, size, date, time_, *name_parts = parts
             name = " ".join(name_parts)
-            # Resolve symlink display (name -> target)
-            if " -> " in name:
-                display_name, target = name.split(" -> ", 1)
-            else:
-                display_name, target = name, None
-
+            display_name, target = name.split(" -> ", 1) if " -> " in name else (name, None)
             entry: dict[str, Any] = {
                 "name": display_name,
                 "permissions": perms,
@@ -1563,13 +1560,55 @@ def list_directory(path: str, host: Optional[str] = None, all: bool = True,
                 entry["symlink_target"] = target
             entries.append(entry)
 
-        if not entries and use_sudo:
+        if not entries:
             return {"ok": False, "path": path, "host": result["host"],
                     "error": "sudo ls succeeded but returned no entries — sudo may lack a TTY or the path is empty."}
         return {"ok": True, "path": path, "host": result["host"],
                 "entries": entries, "count": len(entries)}
+
+    try:
+        host_name, host_cfg = _resolve_host(host)
     except ValueError as exc:
         return {"ok": False, "path": path, "error": str(exc)}
+
+    sep = "\\" if host_cfg.get("windows") else "/"
+    client = None
+    try:
+        client = _ssh_connect(host_cfg)
+        sftp = client.open_sftp()
+        entries = []
+        for attr in sftp.listdir_attr(path):
+            name = attr.filename
+            if not all and name.startswith("."):
+                continue
+            mode = attr.st_mode or 0
+            entry: dict[str, Any] = {
+                "name": name,
+                "permissions": _stat.filemode(mode) if mode else None,
+                "owner": attr.st_uid,   # numeric — SFTP doesn't resolve names;
+                "group": attr.st_gid,   # meaningless (0) on most Windows OpenSSH servers
+                "size_bytes": attr.st_size,
+                "modified": (
+                    datetime.fromtimestamp(attr.st_mtime, tz=timezone.utc).isoformat()
+                    if attr.st_mtime else None
+                ),
+                "type": "directory" if _stat.S_ISDIR(mode) else
+                        "symlink" if _stat.S_ISLNK(mode) else "file",
+            }
+            if entry["type"] == "symlink":
+                try:
+                    entry["symlink_target"] = sftp.readlink(f"{path.rstrip(sep)}{sep}{name}")
+                except Exception:  # noqa: BLE001 — best-effort, don't fail the listing over it
+                    pass
+            entries.append(entry)
+        sftp.close()
+        return {"ok": True, "path": path, "host": host_name,
+                "entries": entries, "count": len(entries)}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "path": path, "host": host_name, "error": str(exc)}
+    finally:
+        if client is not None:
+            client.close()
 
 
 # ---------------------------------------------------------------------------
