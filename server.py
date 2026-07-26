@@ -2797,6 +2797,69 @@ def caddy_remove_route(uuid: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+def _opnsense_ssh_cfg() -> dict:
+    """Build a host_cfg dict for _ssh_connect from the opnsense.ssh config block."""
+    ssh_cfg = _load_config().get("opnsense", {}).get("ssh")
+    if not ssh_cfg or not ssh_cfg.get("hostname"):
+        raise ValueError(
+            "opnsense.ssh config missing — set opnsense.ssh.hostname/user/key_path "
+            "in config.yaml"
+        )
+    return ssh_cfg
+
+
+@_tool
+def opnsense_read_file(path: str, max_bytes: int = 262144) -> dict:
+    """
+    Read a file off OPNsense over SSH (SFTP), for backing up router/plugin
+    config that isn't covered by config.xml's own daily backup — e.g.
+    AdGuard Home's AdGuardHome.yaml, which has no backup coverage otherwise
+    (see incident-2026-07-25-adguard-dns-outage.md, TODO1).
+
+    Unlike the generic read_file tool, this takes no host parameter and only
+    works for exact paths listed in opnsense.file_allowlist in config.yaml.
+    OPNsense is the router/firewall for the whole network, and its
+    config.xml carries plaintext secrets (WiFi PSKs, VPN keys, password
+    hashes) that the generic secret-path guard doesn't recognize — so this
+    tool deliberately can't reach anything outside the curated allowlist,
+    regardless of what the connecting SSH user (root) could otherwise see.
+
+    Args:
+        path: Absolute path on OPNsense. Must exactly match an entry in
+              opnsense.file_allowlist in config.yaml.
+        max_bytes: Maximum bytes to read (default 256 KB). Use 0 for unlimited.
+    """
+    allowlist: list[str] = _load_config().get("opnsense", {}).get("file_allowlist", [])
+    if path not in allowlist:
+        return {
+            "content": None,
+            "path": path,
+            "error": f"'{path}' is not in opnsense.file_allowlist. Allowed: {allowlist}",
+        }
+    try:
+        ssh_cfg = _opnsense_ssh_cfg()
+    except ValueError as exc:
+        return {"content": None, "path": path, "error": str(exc)}
+
+    client = None
+    try:
+        client = _ssh_connect(ssh_cfg)
+        sftp = client.open_sftp()
+        with sftp.file(path, "r") as f:
+            raw = f.read(max_bytes if max_bytes else -1)
+        sftp.close()
+        content = raw.decode("utf-8", errors="replace")
+        result: dict[str, Any] = {"content": content, "path": path, "size_bytes": len(raw)}
+        if max_bytes and len(raw) == max_bytes:
+            result["truncated"] = True
+        return result
+    except Exception as exc:  # noqa: BLE001
+        return {"content": None, "path": path, "error": str(exc)}
+    finally:
+        if client is not None:
+            client.close()
+
+
 @_tool
 def opnsense_list_dhcp_leases(search: Optional[str] = None) -> dict:
     """
