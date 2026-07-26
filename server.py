@@ -8,6 +8,7 @@ Connects to remote hosts via SSH using paramiko.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
@@ -26,6 +27,8 @@ import requests as _requests
 import urllib3
 import yaml
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Image as MCPImage
+from PIL import Image as PILImage
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -262,6 +265,48 @@ def _check_secret_path(path: str) -> None:
             )
 
 
+def _ssh_connect(host_cfg: dict, timeout: int = 30) -> paramiko.SSHClient:
+    """Open an SSH connection, falling back to fallback_hostname if the primary fails.
+
+    host_cfg['hostname'] is tried first, then host_cfg['fallback_hostname']
+    if configured and distinct — e.g. a roaming laptop lists its usual-LAN
+    address as hostname (fast, common case) and its Tailscale address as
+    fallback_hostname (works wherever it physically is). Which address goes
+    in which field is per-host, not tied to a technology — order them by
+    which is actually more often true for that specific device. Raises the
+    primary connection's exception if both fail, since that's the more
+    expected path and the more informative error when neither works.
+    """
+    def _connect_to(hostname: str) -> paramiko.SSHClient:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        connect_kwargs: dict[str, Any] = {
+            "hostname": hostname,
+            "username": host_cfg.get("user", "root"),
+            "timeout": timeout,
+        }
+        key_path = host_cfg.get("key_path")
+        if key_path:
+            connect_kwargs["key_filename"] = str(key_path)
+        port = host_cfg.get("port", 22)
+        if port != 22:
+            connect_kwargs["port"] = int(port)
+        client.connect(**connect_kwargs)
+        return client
+
+    primary = host_cfg["hostname"]
+    fallback = host_cfg.get("fallback_hostname")
+    try:
+        return _connect_to(primary)
+    except Exception as primary_exc:
+        if fallback and fallback != primary:
+            try:
+                return _connect_to(fallback)
+            except Exception:
+                pass
+        raise primary_exc
+
+
 def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60, wrap: bool = True) -> dict[str, Any]:
     """Open a fresh SSH connection, run command, return stdout/stderr/exit_code.
 
@@ -275,22 +320,9 @@ def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60, wrap: bool = True
     wrap=False for known-Windows hosts; there is no server-side kill-after
     guarantee on that path, just the paramiko channel timeout below.
     """
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client = None
     try:
-        connect_kwargs: dict[str, Any] = {
-            "hostname": host_cfg["hostname"],
-            "username": host_cfg.get("user", "root"),
-            "timeout": 30,
-        }
-        key_path = host_cfg.get("key_path")
-        if key_path:
-            connect_kwargs["key_filename"] = str(key_path)
-        port = host_cfg.get("port", 22)
-        if port != 22:
-            connect_kwargs["port"] = int(port)
-
-        client.connect(**connect_kwargs)
+        client = _ssh_connect(host_cfg)
         # Wrap with remote timeout so the process tree is killed server-side.
         # The paramiko channel timeout is set slightly higher so recv_exit_status
         # sees the normal timeout exit rather than raising a socket timeout.
@@ -344,7 +376,8 @@ def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60, wrap: bool = True
         })
         return {"stdout": "", "stderr": str(exc), "exit_code": -1}
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 def _run(host: str | None, command: str, timeout: int = 60) -> dict[str, Any]:
@@ -1046,22 +1079,9 @@ def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200,
         except ValueError as exc:
             return {"content": None, "error": str(exc), "host": host_name, "path": path}
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client = None
     try:
-        connect_kwargs: dict[str, Any] = {
-            "hostname": host_cfg["hostname"],
-            "username": host_cfg.get("user", "root"),
-            "timeout": 30,
-        }
-        key_path = host_cfg.get("key_path")
-        if key_path:
-            connect_kwargs["key_filename"] = str(key_path)
-        port = host_cfg.get("port", 22)
-        if port != 22:
-            connect_kwargs["port"] = int(port)
-
-        client.connect(**connect_kwargs)
+        client = _ssh_connect(host_cfg)
         sftp = client.open_sftp()
         with sftp.file(path, "r") as f:
             if offset_bytes:
@@ -1078,7 +1098,8 @@ def read_file(path: str, host: Optional[str] = None, max_bytes: int = 51200,
     except Exception as exc:  # noqa: BLE001
         return {"content": None, "error": str(exc), "host": host_name, "path": path}
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 @_tool
@@ -1105,21 +1126,9 @@ def write_file(path: str, content: str, host: Optional[str] = None,
         return {"success": False, "error": str(exc), "host": host, "path": path}
 
     if use_sudo:
+        client = None
         try:
-            client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            connect_kwargs: dict[str, Any] = {
-                "hostname": host_cfg["hostname"],
-                "username": host_cfg.get("user", "root"),
-                "timeout": 30,
-            }
-            key_path = host_cfg.get("key_path")
-            if key_path:
-                connect_kwargs["key_filename"] = str(key_path)
-            port = host_cfg.get("port", 22)
-            if port != 22:
-                connect_kwargs["port"] = int(port)
-            client.connect(**connect_kwargs)
+            client = _ssh_connect(host_cfg)
             stdin, stdout, stderr = client.exec_command(f"sudo tee {path} > /dev/null", timeout=30)
             stdin.write(content.encode("utf-8"))
             stdin.channel.shutdown_write()
@@ -1132,22 +1141,9 @@ def write_file(path: str, content: str, host: Optional[str] = None,
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": str(exc), "host": host_name, "path": path}
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client = None
     try:
-        connect_kwargs = {
-            "hostname": host_cfg["hostname"],
-            "username": host_cfg.get("user", "root"),
-            "timeout": 30,
-        }
-        key_path = host_cfg.get("key_path")
-        if key_path:
-            connect_kwargs["key_filename"] = str(key_path)
-        port = host_cfg.get("port", 22)
-        if port != 22:
-            connect_kwargs["port"] = int(port)
-
-        client.connect(**connect_kwargs)
+        client = _ssh_connect(host_cfg)
         sftp = client.open_sftp()
         with sftp.file(path, "w") as f:
             f.write(content.encode("utf-8"))
@@ -1156,7 +1152,8 @@ def write_file(path: str, content: str, host: Optional[str] = None,
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": str(exc), "host": host_name, "path": path}
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 @_tool
@@ -1196,23 +1193,10 @@ def patch_file(
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "host": host, "path": path}
 
-    connect_kwargs: dict[str, Any] = {
-        "hostname": host_cfg["hostname"],
-        "username": host_cfg.get("user", "root"),
-        "timeout": 30,
-    }
-    key_path = host_cfg.get("key_path")
-    if key_path:
-        connect_kwargs["key_filename"] = str(key_path)
-    port = host_cfg.get("port", 22)
-    if port != 22:
-        connect_kwargs["port"] = int(port)
-
     if use_sudo:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client = None
         try:
-            client.connect(**connect_kwargs)
+            client = _ssh_connect(host_cfg)
             _, stdout_r, stderr_r = client.exec_command(f"sudo cat {path}", timeout=30)
             content = stdout_r.read().decode("utf-8", errors="replace")
             if stdout_r.channel.recv_exit_status() != 0:
@@ -1245,12 +1229,12 @@ def patch_file(
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc), "host": host_name, "path": path}
         finally:
-            client.close()
+            if client is not None:
+                client.close()
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client = None
     try:
-        client.connect(**connect_kwargs)
+        client = _ssh_connect(host_cfg)
         sftp = client.open_sftp()
 
         with sftp.file(path, "r") as f:
@@ -1286,7 +1270,8 @@ def patch_file(
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "host": host_name, "path": path}
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 @_tool
@@ -1340,18 +1325,6 @@ def regex_patch_file(
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "host": host, "path": path}
 
-    connect_kwargs: dict[str, Any] = {
-        "hostname": host_cfg["hostname"],
-        "username": host_cfg.get("user", "root"),
-        "timeout": 30,
-    }
-    key_path = host_cfg.get("key_path")
-    if key_path:
-        connect_kwargs["key_filename"] = str(key_path)
-    port = host_cfg.get("port", 22)
-    if port != 22:
-        connect_kwargs["port"] = int(port)
-
     def _apply(content: str) -> tuple[str, int]:
         matches = len(compiled.findall(content))
         if matches == 0:
@@ -1359,10 +1332,9 @@ def regex_patch_file(
         return compiled.sub(replacement, content), matches
 
     if use_sudo:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client = None
         try:
-            client.connect(**connect_kwargs)
+            client = _ssh_connect(host_cfg)
             _, stdout_r, stderr_r = client.exec_command(f"sudo cat {path}", timeout=30)
             content = stdout_r.read().decode("utf-8", errors="replace")
             if stdout_r.channel.recv_exit_status() != 0:
@@ -1382,12 +1354,12 @@ def regex_patch_file(
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc), "host": host_name, "path": path}
         finally:
-            client.close()
+            if client is not None:
+                client.close()
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client = None
     try:
-        client.connect(**connect_kwargs)
+        client = _ssh_connect(host_cfg)
         sftp = client.open_sftp()
 
         with sftp.file(path, "r") as f:
@@ -1406,7 +1378,8 @@ def regex_patch_file(
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "host": host_name, "path": path}
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 @_tool
@@ -1494,22 +1467,9 @@ def stat_file(path: str, host: Optional[str] = None) -> dict:
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "host": host, "path": path}
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client = None
     try:
-        connect_kwargs: dict[str, Any] = {
-            "hostname": host_cfg["hostname"],
-            "username": host_cfg.get("user", "root"),
-            "timeout": 30,
-        }
-        key_path = host_cfg.get("key_path")
-        if key_path:
-            connect_kwargs["key_filename"] = str(key_path)
-        port = host_cfg.get("port", 22)
-        if port != 22:
-            connect_kwargs["port"] = int(port)
-
-        client.connect(**connect_kwargs)
+        client = _ssh_connect(host_cfg)
         sftp = client.open_sftp()
         try:
             attr = sftp.stat(path)
@@ -1543,7 +1503,8 @@ def stat_file(path: str, host: Optional[str] = None) -> dict:
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "host": host_name, "path": path}
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 @_tool
@@ -1609,6 +1570,270 @@ def list_directory(path: str, host: Optional[str] = None, all: bool = True,
                 "entries": entries, "count": len(entries)}
     except ValueError as exc:
         return {"ok": False, "path": path, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Screenshots — multi-host, image-returning
+# ---------------------------------------------------------------------------
+#
+# Screenshots are taken on Windows laptops/desktops (ganymede, phobos) but
+# Claude sessions can run on any host (docker-server, smavm, or natively on
+# ganymede/phobos), and the physical machine being typed on doesn't have to
+# match the machine the session runs on. So these tools never assume "local
+# file" — they always fetch over SFTP from whichever configured host(s) have
+# a screenshot_dir set, and merge results by recency so the caller doesn't
+# need to know or guess which machine has the screenshot.
+
+_SCREENSHOT_CONNECT_TIMEOUT = 6  # short on purpose — a sleeping/offline
+# laptop (phobos) must fail fast, not stall a multi-host query for 30s.
+_SCREENSHOT_MAX_DIMENSION = 1568  # matches Claude's vision downscale
+# threshold — sending more pixels than this costs bytes/tokens for no
+# fidelity gain.
+_SCREENSHOT_MAX_BYTES = 3_500_000  # raw bytes; base64 inflates ~33%, this
+# keeps the encoded payload safely under common ~5MB image-upload caps.
+_SCREENSHOT_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+_SCREENSHOT_UNREACHABLE_COOLDOWN = 1800  # 30 min — once a host fails, skip
+# retrying it (no more 6s waits) until the cooldown lapses or recheck=True is
+# passed. Process-lifetime cache (in-memory, resets on container restart);
+# the cooldown is a safety net for a stuck flag, not the expected recovery
+# path — the expected path is the caller passing recheck=True once told the
+# host is back.
+
+_SCREENSHOT_UNREACHABLE: dict[str, float] = {}  # host_name -> epoch time of last failure
+
+
+def _screenshot_host_skip_entry(host_name: str, recheck: bool) -> Optional[dict]:
+    """None if host_name should be tried; else the unreachable_hosts entry to use instead."""
+    since = _SCREENSHOT_UNREACHABLE.get(host_name)
+    if since is None or recheck:
+        return None
+    if time.time() - since >= _SCREENSHOT_UNREACHABLE_COOLDOWN:
+        return None
+    return {
+        "host": host_name,
+        "error": "skipped — marked unreachable at a recent check; pass recheck=True to retry now",
+        "cached": True,
+        "since": datetime.fromtimestamp(since, tz=timezone.utc).isoformat(),
+    }
+
+
+def _screenshot_hosts() -> list[tuple[str, dict]]:
+    """Every configured host with a screenshot_dir set.
+
+    Adding/removing a screenshot host is a config.yaml edit (hot-reloaded),
+    not a code change.
+    """
+    cfg = _load_config()
+    hosts: dict = cfg.get("hosts", {})
+    return [(name, h) for name, h in hosts.items() if h.get("screenshot_dir")]
+
+
+def _screenshot_sftp_connect(host_cfg: dict, timeout: int = _SCREENSHOT_CONNECT_TIMEOUT):
+    """Short-timeout SSH+SFTP connection (hostname, falling back to
+    fallback_hostname per _ssh_connect). Caller must close the returned client."""
+    client = _ssh_connect(host_cfg, timeout=timeout)
+    return client, client.open_sftp()
+
+
+def _screenshot_path(host_cfg: dict, filename: str) -> str:
+    sep = "\\" if host_cfg.get("windows") else "/"
+    return f"{host_cfg['screenshot_dir'].rstrip(sep)}{sep}{filename}"
+
+
+def _list_screenshots_raw(limit: int, recheck: bool = False) -> tuple[list[dict], list[dict]]:
+    """Query every screenshot host over SFTP; return (entries, unreachable_hosts).
+
+    entries are newest-first across all hosts combined. A host that times out
+    or errors is recorded in unreachable_hosts and skipped, rather than
+    failing the whole call — see _SCREENSHOT_CONNECT_TIMEOUT. A host that
+    just failed is skipped without retrying (no repeated 6s waits) until
+    _SCREENSHOT_UNREACHABLE_COOLDOWN lapses or recheck=True is passed — see
+    _screenshot_host_skip_entry.
+    """
+    entries: list[dict] = []
+    unreachable: list[dict] = []
+    for host_name, host_cfg in _screenshot_hosts():
+        skip_entry = _screenshot_host_skip_entry(host_name, recheck)
+        if skip_entry is not None:
+            unreachable.append(skip_entry)
+            continue
+        client = None
+        try:
+            client, sftp = _screenshot_sftp_connect(host_cfg)
+            _SCREENSHOT_UNREACHABLE.pop(host_name, None)
+            for attr in sftp.listdir_attr(host_cfg["screenshot_dir"]):
+                name = attr.filename
+                if not name.lower().endswith(_SCREENSHOT_EXTENSIONS):
+                    continue
+                entries.append({
+                    "host": host_name,
+                    "filename": name,
+                    "size_bytes": attr.st_size,
+                    "modified": (
+                        datetime.fromtimestamp(attr.st_mtime, tz=timezone.utc).isoformat()
+                        if attr.st_mtime else None
+                    ),
+                    "_mtime": attr.st_mtime or 0,
+                })
+        except Exception as exc:  # noqa: BLE001
+            _SCREENSHOT_UNREACHABLE[host_name] = time.time()
+            unreachable.append({"host": host_name, "error": str(exc), "cached": False})
+        finally:
+            if client is not None:
+                client.close()
+
+    entries.sort(key=lambda e: e["_mtime"], reverse=True)
+    for e in entries:
+        del e["_mtime"]
+    return entries[:limit], unreachable
+
+
+def _prepare_screenshot_bytes(raw: bytes, filename: str) -> tuple[bytes, str, dict]:
+    """Downscale/recompress an oversized screenshot; pass small ones through untouched.
+
+    Returns (final_bytes, mime_type, metadata dict describing what happened).
+    """
+    meta: dict[str, Any] = {"original_size_bytes": len(raw)}
+    try:
+        img = PILImage.open(io.BytesIO(raw))
+        img.load()
+    except Exception as exc:  # noqa: BLE001
+        # Undecodable (or a format Pillow doesn't handle) — pass raw bytes
+        # through as-is rather than failing; the client may still render it.
+        meta["resized"] = False
+        meta["warning"] = f"could not decode for resize check: {exc}"
+        ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else "png"
+        mime = {"jpg": "image/jpeg"}.get(ext, f"image/{ext}")
+        return raw, mime, meta
+
+    meta["original_dimensions"] = f"{img.width}x{img.height}"
+    longest_edge = max(img.width, img.height)
+    if longest_edge <= _SCREENSHOT_MAX_DIMENSION and len(raw) <= _SCREENSHOT_MAX_BYTES:
+        meta["resized"] = False
+        return raw, PILImage.MIME.get(img.format, "image/png"), meta
+
+    if longest_edge > _SCREENSHOT_MAX_DIMENSION:
+        scale = _SCREENSHOT_MAX_DIMENSION / longest_edge
+        img = img.resize(
+            (max(1, round(img.width * scale)), max(1, round(img.height * scale))),
+            PILImage.LANCZOS,
+        )
+    if img.mode in ("RGBA", "P", "LA"):
+        img = img.convert("RGB")
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85, optimize=True)
+    final = buf.getvalue()
+    meta.update({
+        "resized": True,
+        "returned_dimensions": f"{img.width}x{img.height}",
+        "returned_size_bytes": len(final),
+    })
+    return final, "image/jpeg", meta
+
+
+@_tool
+def list_screenshots(n: int = 5, recheck: bool = False) -> dict:
+    """
+    List the most recent screenshots across all configured screenshot hosts.
+
+    Screenshots are taken locally on Windows machines (ganymede, phobos) and
+    read remotely over SFTP — works no matter which host this Claude session
+    itself is running on. Hosts that are unreachable (e.g. a sleeping laptop)
+    are skipped rather than failing the call; check unreachable_hosts if an
+    expected screenshot is missing. Once a host fails, it's skipped without
+    retrying (no repeated multi-second waits) for a while — see recheck.
+
+    Args:
+        n: Maximum number of screenshots to return, newest first (default 5).
+        recheck: If True, retry every host now even if one recently failed
+                 and would otherwise be skipped from cache. Use this when
+                 told a previously-unreachable host is back online — don't
+                 set it on every call, only once, right after being told.
+    """
+    entries, unreachable = _list_screenshots_raw(n, recheck=recheck)
+    return {"screenshots": entries, "count": len(entries), "unreachable_hosts": unreachable}
+
+
+@_tool
+def get_screenshot(filename: Optional[str] = None, host: Optional[str] = None,
+                    recheck: bool = False) -> list:
+    """
+    Fetch a screenshot and return it as a viewable image.
+
+    With no arguments, returns the single most recent screenshot across every
+    configured screenshot host — the caller does not need to know which
+    physical machine it was taken on. Pass filename (from list_screenshots)
+    to fetch a specific one; pass host too only if that filename could exist
+    on more than one host.
+
+    Large images are automatically downscaled/recompressed to JPEG before
+    being returned, to stay within a safe size for the model to view — see
+    the accompanying metadata for original vs. returned dimensions/size.
+
+    Args:
+        filename: Specific screenshot filename. If omitted, the most recent
+                  screenshot across all hosts is used.
+        host: Named host to fetch from. Only needed to disambiguate a
+              filename that exists on more than one host.
+        recheck: If True, retry a recently-unreachable host now instead of
+                 skipping it from cache. See list_screenshots' recheck.
+    """
+    if filename is None:
+        entries, unreachable = _list_screenshots_raw(1, recheck=recheck)
+        if not entries:
+            return [{"error": "No screenshots found.", "unreachable_hosts": unreachable}]
+        host_name, filename = entries[0]["host"], entries[0]["filename"]
+    else:
+        candidates = [(h, cfg) for h, cfg in _screenshot_hosts() if host is None or h == host]
+        if host is not None and not candidates:
+            return [{"error": f"Host '{host}' has no screenshot_dir configured."}]
+        found: list[str] = []
+        skipped: list[dict] = []
+        for h, cfg in candidates:
+            skip_entry = _screenshot_host_skip_entry(h, recheck)
+            if skip_entry is not None:
+                skipped.append(skip_entry)
+                continue
+            client = None
+            try:
+                client, sftp = _screenshot_sftp_connect(cfg)
+                sftp.stat(_screenshot_path(cfg, filename))
+                _SCREENSHOT_UNREACHABLE.pop(h, None)
+                found.append(h)
+            except FileNotFoundError:
+                continue
+            except Exception:  # noqa: BLE001 — host unreachable, not just a missing file
+                _SCREENSHOT_UNREACHABLE[h] = time.time()
+                continue
+            finally:
+                if client is not None:
+                    client.close()
+        if not found:
+            return [{"error": f"'{filename}' not found on any reachable screenshot host.",
+                     "skipped_hosts": skipped}]
+        if len(found) > 1:
+            return [{"error": f"'{filename}' exists on multiple hosts {found} — pass host= to disambiguate."}]
+        host_name = found[0]
+
+    host_cfg = dict(_screenshot_hosts())[host_name]
+    target_path = _screenshot_path(host_cfg, filename)
+    client = None
+    try:
+        client, sftp = _screenshot_sftp_connect(host_cfg)
+        with sftp.file(target_path, "rb") as f:
+            raw = f.read()
+        _SCREENSHOT_UNREACHABLE.pop(host_name, None)
+    except Exception as exc:  # noqa: BLE001
+        _SCREENSHOT_UNREACHABLE[host_name] = time.time()
+        return [{"error": str(exc), "host": host_name, "path": target_path}]
+    finally:
+        if client is not None:
+            client.close()
+
+    data, mime, meta = _prepare_screenshot_bytes(raw, filename)
+    meta.update({"host": host_name, "filename": filename, "path": target_path})
+    return [MCPImage(data=data, format=mime.split("/")[-1]), meta]
 
 
 @_tool
@@ -1740,22 +1965,9 @@ def validate_config(path: str, host: Optional[str] = None) -> dict:
     else:
         return {"ok": False, "error": f"Unsupported extension '{ext}'. Expected .yml, .yaml, or .json.", "path": path}
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client = None
     try:
-        connect_kwargs: dict[str, Any] = {
-            "hostname": host_cfg["hostname"],
-            "username": host_cfg.get("user", "root"),
-            "timeout": 30,
-        }
-        key_path = host_cfg.get("key_path")
-        if key_path:
-            connect_kwargs["key_filename"] = str(key_path)
-        port = host_cfg.get("port", 22)
-        if port != 22:
-            connect_kwargs["port"] = int(port)
-
-        client.connect(**connect_kwargs)
+        client = _ssh_connect(host_cfg)
         sftp = client.open_sftp()
         with sftp.file(path, "r") as f:
             content = f.read().decode("utf-8", errors="replace")
@@ -1779,7 +1991,8 @@ def validate_config(path: str, host: Optional[str] = None) -> dict:
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc), "host": host_name, "path": path}
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 # ---------------------------------------------------------------------------

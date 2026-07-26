@@ -14,6 +14,7 @@ the kind of homelab it was built to operate.
 | Remote execution | **[Paramiko](https://www.paramiko.org/)** | Pure-Python SSH/SFTP — no shelling out to a system `ssh` binary |
 | Service APIs | **Requests** | The homelab API proxy and Home Assistant / Cloudflare / OPNsense integrations |
 | Config | **PyYAML** | Single hot-reloadable `config.yaml` |
+| Images | **Pillow** | Downscales/recompresses oversized screenshots before they're returned as MCP image content |
 | Packaging | **Docker + Compose** | Reproducible, runs as a non-root user, mounts secrets read-only |
 
 The entire server is a single `server.py`. Tools are plain Python functions
@@ -54,7 +55,7 @@ selected entirely through environment variables — no code branches. See
 
 | Port | Trust | Auth | Tools |
 |---|---|---|---|
-| 8090 | Trusted LAN | none (LAN trust) | all 64 |
+| 8090 | Trusted LAN | none (LAN trust) | all 71 |
 | 8091 | Public via Cloudflare | **bearer token required** | read-only subset |
 | 8092 | Untrusted LAN clients | none | read-only subset + whitelisted light control |
 

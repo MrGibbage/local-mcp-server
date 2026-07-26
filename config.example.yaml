@@ -39,6 +39,16 @@ hosts:
     user: myuser
     key_path: /keys/id_rsa
 
+  laptop:
+    hostname: 192.168.1.104        # tried first — e.g. usual LAN address
+    # fallback_hostname: 100.x.y.z # tried only if hostname fails, e.g. a
+    #                               # Tailscale address for when it roams.
+    #                               # Order by whichever is more often true.
+    user: myuser
+    key_path: /keys/id_rsa
+    # Optional: enables list_screenshots/get_screenshot for this host.
+    # screenshot_dir: 'C:\Users\myuser\Pictures\Screenshots'
+
 # Optional: restrict which base commands ssh_exec is allowed to run.
 # Comment out this block (or set to null) to allow all commands.
 # The check matches the first word of the command against this list.

@@ -18,7 +18,7 @@ that gives an AI assistant a safe, structured way to run a real multi-host
 homelab — Docker, Proxmox, systemd, files over SSH, Home Assistant, Cloudflare,
 OPNsense, and any HTTP API service you configure.
 
-It ships **64 tools** today, but the headline isn't the count. It's the
+It ships **71 tools** today, but the headline isn't the count. It's the
 **security model**: the assistant operates everything through server-side proxy
 tools, so API keys, SSH private keys, and tokens **never enter its context**.
 
@@ -47,7 +47,7 @@ and can leak into a transcript. This server is built the opposite way:
 
 ## What it can do
 
-A few representative tools — see the [full catalog](docs/tools.md) for all 64:
+A few representative tools — see the [full catalog](docs/tools.md) for all 71:
 
 ```text
 homelab_api_get("sonarr", "/series")        # call any configured API, key-safe
@@ -56,10 +56,12 @@ proxmox_snapshot_create(vmid=110)           # snapshot a VM before a change
 ha_get_state("sensor.living_room_temp")     # read Home Assistant
 loki_query('{container="caddy"} |= "404"')  # query logs with LogQL
 read_file("/etc/caddy/Caddyfile", host="nas")
+get_screenshot()                            # fetch the latest screenshot from any configured host, as an image
 ```
 
-Tool families: **Host/Shell · Docker · Systemd · Files (SFTP) · Proxmox ·
-Home Assistant · Caddy/OPNsense · Cloudflare · Loki · HTTP API proxy.**
+Tool families: **Host/Shell · Docker · Systemd · Files (SFTP) · Screenshots ·
+Proxmox · Home Assistant · Caddy/OPNsense · Cloudflare · Loki · Media ·
+HTTP API proxy.**
 
 ## Tech stack
 
@@ -113,7 +115,7 @@ Full walkthrough — keys, env vars, public access via Cloudflare Tunnel — is 
 | [Architecture & design](docs/architecture.md) | Tech stack, design rationale, the homelab it drives |
 | [Configuration](docs/configuration.md) | `config.yaml`, the API proxy, allowlists, deployment profiles |
 | [Security model](docs/security.md) | How credentials stay out of the model's context |
-| [Tool catalog](docs/tools.md) | All 64 tools, grouped |
+| [Tool catalog](docs/tools.md) | All 71 tools, grouped |
 | [Deployment](deployment.md) | Public access over Cloudflare Tunnel |
 
 ## License

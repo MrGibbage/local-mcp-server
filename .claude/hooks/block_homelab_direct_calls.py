@@ -20,12 +20,23 @@ SERVICE_PORT_RE = re.compile(
 
 
 def block(reason: str) -> None:
-    print(json.dumps({"decision": "block", "reason": reason}))
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }))
     sys.exit(0)
 
 
 def allow() -> None:
-    print(json.dumps({"decision": "allow"}))
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+        }
+    }))
     sys.exit(0)
 
 

@@ -98,6 +98,27 @@ SSH private keys live in `./keys/` on the host, mounted **read-only** into the
 container at `/keys/`. The matching public key must be in
 `~/.ssh/authorized_keys` on each target host.
 
+### Fallback address for roaming/multi-network hosts
+
+A host can list a second address to try if the primary one fails:
+
+```yaml
+hosts:
+  laptop:
+    hostname: 192.168.1.50      # tried first
+    fallback_hostname: 100.x.y.z  # tried only if hostname fails
+    user: myuser
+    key_path: /keys/id_rsa
+```
+
+Order `hostname`/`fallback_hostname` by whichever address is actually true
+*more often* for that specific device — it's not tied to a technology. A
+laptop that's usually on the LAN but occasionally roams onto a Tailscale/VPN
+address should put the LAN address first; a device reached mostly remotely
+should put the VPN address first. Every SSH-based tool (`read_file`,
+`ssh_exec`, `list_screenshots`, etc.) goes through this fallback automatically
+— it's not something each tool implements separately.
+
 ## Proxmox nodes — naming with multiple servers
 
 Proxmox is configured separately under `proxmox_nodes:` (a **list**, not a map),
@@ -210,6 +231,31 @@ hosts:
 
 Omit the global block (or set it to `null`) to allow everything. The check
 matches the **first token** of the command against the list.
+
+## Screenshots
+
+Any host can opt into `list_screenshots`/`get_screenshot` by adding a
+`screenshot_dir`:
+
+```yaml
+hosts:
+  desktop:
+    hostname: 192.168.1.60
+    user: myuser
+    key_path: /keys/id_rsa
+    screenshot_dir: 'C:\Users\myuser\Pictures\Screenshots'
+```
+
+Every host with `screenshot_dir` set is queried automatically and results are
+merged by recency — the caller doesn't pick a host, the tool finds the
+newest screenshot across all of them. Adding or removing a screenshot host is
+just this config edit (hot-reloaded), not a code change.
+
+A host that fails to connect is skipped rather than failing the whole call,
+and — to avoid repeatedly eating a connection timeout on a host that's known
+to be down — is **not retried for 30 minutes** after a failure. Pass
+`recheck=true` to either tool to force an immediate retry (e.g. once told a
+host is back online) without waiting out the cooldown.
 
 ## Integration blocks
 

@@ -1,6 +1,6 @@
 # Tool Catalog
 
-The server exposes **64 tools**. They're grouped below. Any subset can be
+The server exposes **71 tools**. They're grouped below. Any subset can be
 enabled per deployment via the `MCP_ENABLED_TOOLS` allowlist — see
 [configuration.md](configuration.md#deployment-profiles).
 
@@ -28,6 +28,8 @@ sees the key.
 | `disk_usage` | `df -h` summary |
 | `memory_usage` | `free -h` summary |
 | `http_get` | Make an HTTP GET and return status + body |
+| `kill_pid` | Send a signal to a single numeric PID (no shell metacharacters) |
+| `list_crontab` | List cron jobs for the SSH user (read-only) |
 
 ## Docker
 
@@ -66,6 +68,20 @@ sees the key.
 | `validate_config` | Validate YAML/JSON without restarting |
 | `rclone_ls` | List files on an rclone remote |
 
+## Screenshots (multi-host, over SFTP)
+
+Any host in `config.yaml` with a `screenshot_dir` set (e.g. a Windows machine)
+is queried automatically — the caller doesn't need to know which physical
+machine took the screenshot. Built so a session running anywhere (a headless
+Linux box, a different machine than the one physically screenshotted) can
+still see it. Unreachable hosts are skipped and cached for a cooldown window
+rather than retried on every call — see [configuration.md](configuration.md).
+
+| Tool | Description |
+|---|---|
+| `list_screenshots` | List the most recent screenshots across all screenshot hosts, newest first |
+| `get_screenshot` | Fetch a screenshot as a viewable image; defaults to the single most recent across all hosts |
+
 ## Proxmox
 
 | Tool | Description |
@@ -101,3 +117,16 @@ sees the key.
 | Tool | Description |
 |---|---|
 | `loki_query` | Query Loki logs with LogQL |
+
+## Media
+
+| Tool | Description |
+|---|---|
+| `ffmpeg_probe` | Probe a media file or stream URL (codec/resolution/container) — fixed `-t 5 -f null` read, no arbitrary ffmpeg flags |
+
+## Holocron docs repo
+
+| Tool | Description |
+|---|---|
+| `holocron_git_status` | Git status + last-commit age for the holocron clone on one host (read-only) |
+| `holocron_sync_push` | Run the existing add/commit/pull --rebase/push sync script on one host — requires `confirmed=true` |
