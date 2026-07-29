@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote as _url_quote
+from urllib.parse import urlparse as _urlparse
 
 import paramiko
 import requests as _requests
@@ -3600,9 +3601,30 @@ def _api_svc_cfg(service: str) -> dict:
     return cfg
 
 
-def _api_build_request(cfg: dict, path: str, params: dict | None) -> tuple[str, dict, dict]:
-    """Return (url, headers, params_dict) with auth injected."""
+def _api_normalize_path(base_url: str, path: str) -> tuple[str, Optional[str]]:
+    """Strip a path prefix that duplicates one already baked into base_url.
+
+    Some base_urls already include an API prefix (e.g. n8n's
+    http://host:5678/api/v1). Callers who don't know that will often repeat
+    the prefix in `path` (e.g. "/api/v1/workflows"), doubling it into a 404.
+    If `path` starts with the same prefix already present in base_url, strip
+    it and return a note describing the correction rather than erroring out.
+    """
+    base_path = _urlparse(base_url.rstrip("/")).path.rstrip("/")
+    if base_path and (path == base_path or path.startswith(base_path + "/")):
+        stripped = path[len(base_path):] or "/"
+        note = (
+            f"Stripped duplicate prefix '{base_path}' from requested path "
+            f"'{path}' (base_url already includes it) — used '{stripped}' instead."
+        )
+        return stripped, note
+    return path, None
+
+
+def _api_build_request(cfg: dict, path: str, params: dict | None) -> tuple[str, dict, dict, Optional[str]]:
+    """Return (url, headers, params_dict, note) with auth injected."""
     base_url = cfg["base_url"].rstrip("/")
+    path, note = _api_normalize_path(base_url, path)
     url = base_url + path
     headers: dict = {}
     params = dict(params or {})
@@ -3624,7 +3646,7 @@ def _api_build_request(cfg: dict, path: str, params: dict | None) -> tuple[str, 
     elif style == "googlelogin":
         headers["Authorization"] = f"GoogleLogin auth={token}"
 
-    return url, headers, params
+    return url, headers, params, note
 
 
 def _api_secrets(cfg: dict) -> list[str]:
@@ -3679,9 +3701,12 @@ def homelab_api_get(service: str, path: str, params: Optional[dict] = None) -> d
     """
     try:
         cfg = _api_svc_cfg(service)
-        url, headers, resolved_params = _api_build_request(cfg, path, params)
+        url, headers, resolved_params, note = _api_build_request(cfg, path, params)
         resp = _requests.get(url, headers=headers, params=resolved_params, timeout=15, verify=False)
-        return _api_parse_response(cfg, resp)
+        result = _api_parse_response(cfg, resp)
+        if note:
+            result["note"] = note
+        return result
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
@@ -3712,6 +3737,7 @@ def homelab_api_post(service: str, path: str, body: Optional[dict] = None) -> di
                 "ok": False,
                 "error": f"POST is not configured for service '{service}'. No post_allowlist defined.",
             }
+        path, note = _api_normalize_path(cfg["base_url"], path)
         if not any(
             path == entry or path.startswith(entry.rstrip("/") + "/") for entry in allowlist
         ):
@@ -3722,12 +3748,15 @@ def homelab_api_post(service: str, path: str, body: Optional[dict] = None) -> di
                     f"Allowed prefixes: {allowlist}"
                 ),
             }
-        url, headers, resolved_params = _api_build_request(cfg, path, {})
+        url, headers, resolved_params, _note = _api_build_request(cfg, path, {})
         headers["Content-Type"] = "application/json"
         resp = _requests.post(
             url, headers=headers, params=resolved_params, json=body or {}, timeout=15, verify=False
         )
-        return _api_parse_response(cfg, resp)
+        result = _api_parse_response(cfg, resp)
+        if note:
+            result["note"] = note
+        return result
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
@@ -3773,7 +3802,7 @@ def homelab_api_mutate(
         if method not in ("PUT", "PATCH", "DELETE"):
             return {"ok": False, "error": f"Method '{method}' not permitted. Use PUT, PATCH, or DELETE."}
         cfg = _api_svc_cfg(service)
-        url, headers, resolved_params = _api_build_request(cfg, path, {})
+        url, headers, resolved_params, note = _api_build_request(cfg, path, {})
         headers["Content-Type"] = "application/json"
         if method == "DELETE":
             resp = _requests.delete(url, headers=headers, params=resolved_params, timeout=15, verify=False)
@@ -3785,7 +3814,10 @@ def homelab_api_mutate(
             resp = _requests.patch(
                 url, headers=headers, params=resolved_params, json=body or {}, timeout=15, verify=False
             )
-        return _api_parse_response(cfg, resp)
+        result = _api_parse_response(cfg, resp)
+        if note:
+            result["note"] = note
+        return result
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
