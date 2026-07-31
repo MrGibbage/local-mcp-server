@@ -247,6 +247,15 @@ _SECRET_PATH_PATTERNS: list[_re.Pattern] = [
     _re.compile(r"(^|/)(credentials|token)\.json$"),
     _re.compile(r"\.pem$"),
     _re.compile(r"\.key$"),
+    # Claude Code's own settings files, on ANY host — these carry live
+    # service tokens in their documented "env" block (see homelab CLAUDE.md's
+    # MCP Setup section), the same class of exposure /etc/homelab guards
+    # against, just living on the client machine instead of the server.
+    # [/\\] matches both path styles so this catches Windows
+    # (C:\Users\<user>\.claude\...), Linux (/home/<user>/.claude/...), and
+    # WSL (/mnt/c/Users/<user>/.claude/...) without hardcoding a username.
+    _re.compile(r"[/\\]\.claude[/\\]settings(\.local)?\.json$"),
+    _re.compile(r"(^|[/\\])\.claude\.json$"),
 ]
 
 

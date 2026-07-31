@@ -29,6 +29,20 @@ that would surface them — no `docker inspect`, no `env`/`printenv`, no reading
 `.env`. A credential-rotation script is kept on hand for the case where a secret
 does end up in a transcript.
 
+The same guard (`_check_secret_path`, checked by `read_file`, `write_file`,
+`patch_file`, `regex_patch_file`, `grep_file`, `tail_file`, and `ffmpeg_probe`)
+also blocks credential-shaped files on the **remote hosts these tools reach
+over SSH** — including Windows hosts. This covers Claude Code's own settings
+files (`.claude/settings.json`, `.claude/settings.local.json`, `.claude.json`),
+since their documented `env` block can carry live service tokens (see the
+global `CLAUDE.md`'s MCP Setup section); a plain `read_file` against one of
+these on any host is blocked outright, the same as `/etc/homelab/`. The block
+is total, not redaction — matching every other entry in the guard's pattern
+list, and simpler/more conservative than trying to parse and selectively
+redact arbitrary, sometimes deeply-nested JSON. `stat_file` is deliberately
+exempt from this guard, since it only returns metadata (existence, size,
+mtime), never file content.
+
 ## Container hardening
 
 - Runs as a **non-root** user (`mcp`) inside the image.
