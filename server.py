@@ -3834,6 +3834,301 @@ def homelab_api_mutate(
 
 
 # ---------------------------------------------------------------------------
+# Tools — Seerr media requests (hardcoded to seerr only, narrow enough for a
+# broadly-shared bot — same "hardcoded path IS the boundary" model as
+# ha_light_control and the holocron tools below)
+# ---------------------------------------------------------------------------
+
+
+def _seerr_get(path: str, params: Optional[dict] = None) -> dict:
+    """Shared GET helper for the seerr_* tools below. Hardcodes service='seerr'.
+
+    Builds the query string manually with percent-encoding (%20 for spaces)
+    instead of passing params= to requests.get, which defaults to
+    quote_plus (+  for spaces) — Seerr's strict OpenAPI validation rejects
+    the literal '+' as an unencoded reserved character. Found while testing
+    seerr_search with a multi-word title ("The Bear" 400'd; single-word
+    queries didn't, which is what hid this until live-tested).
+    """
+    cfg = _api_svc_cfg("seerr")
+    url, headers, resolved_params, note = _api_build_request(cfg, path, params)
+    if resolved_params:
+        query = "&".join(f"{k}={_url_quote(str(v), safe='')}" for k, v in resolved_params.items())
+        url = f"{url}?{query}"
+    resp = _requests.get(url, headers=headers, timeout=15, verify=False)
+    result = _api_parse_response(cfg, resp)
+    if note:
+        result["note"] = note
+    return result
+
+
+@_tool
+def seerr_search(query: str) -> dict:
+    """
+    Search Seerr's media catalog (movies, TV shows, people) by title.
+
+    Args:
+        query: Free-text search string, e.g. "The Bear".
+    """
+    try:
+        return _seerr_get("/search", {"query": query})
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+
+
+@_tool
+def seerr_trending() -> dict:
+    """Return currently trending movies and TV shows from Seerr/TMDB."""
+    try:
+        return _seerr_get("/discover/trending")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+
+
+@_tool
+def seerr_discover(
+    media_type: str,
+    genre: Optional[str] = None,
+    sort_by: str = "popularity.desc",
+) -> dict:
+    """
+    Browse movies or TV shows with optional genre filtering — for "recommend
+    a sci-fi movie" style requests.
+
+    Args:
+        media_type: "movie" or "tv".
+        genre: Optional comma-separated TMDB genre ID(s), e.g. "878" for
+               Sci-Fi. Omit to browse unfiltered.
+        sort_by: TMDB sort key, default "popularity.desc".
+    """
+    mt = (media_type or "").strip().lower()
+    if mt not in ("movie", "tv"):
+        return {"ok": False, "error": "media_type must be 'movie' or 'tv'."}
+    params: dict[str, Any] = {"sortBy": sort_by}
+    if genre:
+        params["genre"] = genre
+    try:
+        return _seerr_get(f"/discover/{'movies' if mt == 'movie' else 'tv'}", params)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+
+
+@_tool
+def seerr_recommendations(media_id: int, media_type: str) -> dict:
+    """
+    Return recommended titles similar to a given movie or TV show.
+
+    Args:
+        media_id: TMDB ID of the reference title (from seerr_search/seerr_discover).
+        media_type: "movie" or "tv".
+    """
+    mt = (media_type or "").strip().lower()
+    if mt not in ("movie", "tv"):
+        return {"ok": False, "error": "media_type must be 'movie' or 'tv'."}
+    try:
+        return _seerr_get(f"/{mt}/{media_id}/recommendations")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+
+
+@_tool
+def seerr_media_details(media_id: int, media_type: str) -> dict:
+    """
+    Return full detail for one movie or TV show, including season count and
+    current availability status.
+
+    Args:
+        media_id: TMDB ID (from seerr_search/seerr_discover).
+        media_type: "movie" or "tv".
+    """
+    mt = (media_type or "").strip().lower()
+    if mt not in ("movie", "tv"):
+        return {"ok": False, "error": "media_type must be 'movie' or 'tv'."}
+    try:
+        return _seerr_get(f"/{mt}/{media_id}")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+
+
+_SEERR_MAX_SEASONS = 4
+
+
+@_tool
+def seerr_request_media(
+    media_id: int,
+    media_type: str,
+    seasons: str = "all",
+    confirmed: bool = False,
+) -> dict:
+    """
+    Request a movie or TV show via Seerr. Hardcoded to POST /request on the
+    seerr service only.
+
+    Always previews first: with confirmed=False (the default) this returns a
+    dry-run summary and submits nothing. Show that summary to the user and
+    get an explicit yes, then call again with confirmed=True to actually
+    submit. This mirrors holocron_sync_push's confirmed gate below.
+
+    Guardrail: refuses "all" seasons (or an explicit list of more than
+    _SEERR_MAX_SEASONS) for a TV show with more seasons than that total, to
+    prevent a single request from swamping the download queue. Ask the user
+    which specific seasons they want instead.
+
+    Args:
+        media_id: TMDB ID (from seerr_search/seerr_discover/seerr_media_details).
+        media_type: "movie" or "tv".
+        seasons: "all", or a comma-separated list of season numbers (e.g. "1,2").
+                 Ignored for movies.
+        confirmed: Set True only after the user has explicitly confirmed this
+                   specific request in the current conversation.
+    """
+    mt = (media_type or "").strip().lower()
+    if mt not in ("movie", "tv"):
+        return {"ok": False, "error": "media_type must be 'movie' or 'tv'."}
+
+    try:
+        details = _seerr_get(f"/{mt}/{media_id}")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+    if not details.get("ok"):
+        return details
+    info = details.get("data", {}) or {}
+    title = info.get("title") or info.get("name") or f"{mt} {media_id}"
+
+    season_list: Optional[list[int]] = None
+    if mt == "tv":
+        total_seasons = info.get("numberOfSeasons")
+        if seasons == "all":
+            if isinstance(total_seasons, int) and total_seasons > _SEERR_MAX_SEASONS:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"'{title}' has {total_seasons} seasons — refusing to request "
+                        f"'all' (cap is {_SEERR_MAX_SEASONS}). Ask which specific "
+                        f"seasons to request instead."
+                    ),
+                }
+        else:
+            try:
+                season_list = [int(s.strip()) for s in seasons.split(",") if s.strip()]
+            except ValueError:
+                return {"ok": False, "error": f"Could not parse seasons '{seasons}' as numbers."}
+            if len(season_list) > _SEERR_MAX_SEASONS:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Requesting {len(season_list)} seasons at once exceeds the "
+                        f"cap of {_SEERR_MAX_SEASONS}. Split into smaller requests."
+                    ),
+                }
+
+    if not confirmed:
+        return {
+            "ok": True,
+            "preview": True,
+            "title": title,
+            "media_type": mt,
+            "seasons": season_list if season_list is not None else ("all" if mt == "tv" else None),
+            "already_available": (info.get("mediaInfo") or {}).get("status") == 5,
+            "note": (
+                "Preview only — nothing submitted. Confirm with the user, then call "
+                "again with confirmed=True."
+            ),
+        }
+
+    body: dict[str, Any] = {"mediaId": media_id, "mediaType": mt, "is4k": False}
+    if mt == "tv":
+        body["seasons"] = season_list if season_list is not None else "all"
+
+    try:
+        cfg = _api_svc_cfg("seerr")
+        url, headers, resolved_params, note = _api_build_request(cfg, "/request", {})
+        headers["Content-Type"] = "application/json"
+        resp = _requests.post(
+            url, headers=headers, params=resolved_params, json=body, timeout=15, verify=False
+        )
+        result = _api_parse_response(cfg, resp)
+        if note:
+            result["note"] = note
+        return result
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# Tools — Tautulli Plex status (hardcoded to tautulli only, hardcoded cmd per
+# tool rather than a raw passthrough — Tautulli's API has plenty of cmds we
+# don't want reachable, e.g. terminate_session, delete_history)
+# ---------------------------------------------------------------------------
+
+
+def _tautulli_cmd(cmd: str) -> dict:
+    """Shared GET helper for the tautulli_* tools below. Hardcodes service='tautulli'.
+
+    Same manual query-string encoding as _seerr_get, for consistency — none
+    of our hardcoded cmd values contain spaces today, but this avoids the
+    same latent bug if that ever changes.
+    """
+    cfg = _api_svc_cfg("tautulli")
+    url, headers, resolved_params, note = _api_build_request(cfg, "/api/v2", {"cmd": cmd})
+    if resolved_params:
+        query = "&".join(f"{k}={_url_quote(str(v), safe='')}" for k, v in resolved_params.items())
+        url = f"{url}?{query}"
+    resp = _requests.get(url, headers=headers, timeout=15, verify=False)
+    result = _api_parse_response(cfg, resp)
+    if note:
+        result["note"] = note
+    return result
+
+
+@_tool
+def tautulli_activity() -> dict:
+    """Return current Plex streaming activity — who's watching what right now."""
+    try:
+        return _tautulli_cmd("get_activity")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+
+
+@_tool
+def tautulli_server_info() -> dict:
+    """Return Plex server info (version, platform) — success means Plex is reachable."""
+    try:
+        return _tautulli_cmd("get_server_info")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+
+
+@_tool
+def tautulli_library_stats() -> dict:
+    """Return per-library item counts (Movies, TV Shows, etc.) from Plex via Tautulli."""
+    try:
+        return _tautulli_cmd("get_libraries")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+
+
+# ---------------------------------------------------------------------------
 # Tools — Holocron docs repo (git status / sync only, no arbitrary paths)
 # ---------------------------------------------------------------------------
 
