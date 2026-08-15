@@ -2401,6 +2401,44 @@ def proxmox_storage_info(host: str) -> dict:
 
 
 @_tool
+def proxmox_list_backup_jobs(host: str) -> dict:
+    """
+    List configured vzdump backup jobs on a Proxmox node.
+
+    Returns each job's id, schedule, storage target, retention
+    (prune-backups), enabled state, mode, compression, and VMID selector
+    (which guests it covers — "all" or a specific vmid list). Omits
+    "mailto" — the job's notification email isn't needed for audit
+    purposes.
+
+    Args:
+        host: Proxmox node name from config (e.g. 'proxmox1') or bare IP address.
+    """
+    try:
+        node_cfg = _resolve_proxmox_node(host)
+        resp = _proxmox_api(node_cfg, "GET", "/cluster/backup")
+        jobs = [
+            {
+                "id": j.get("id", ""),
+                "enabled": bool(j.get("enabled", 0)),
+                "schedule": j.get("schedule", ""),
+                "next_run": j.get("next-run"),
+                "storage": j.get("storage", ""),
+                "retention": j.get("prune-backups", ""),
+                "mode": j.get("mode", ""),
+                "compress": j.get("compress", ""),
+                "vmid": j.get("vmid", j.get("all") and "all" or ""),
+            }
+            for j in resp.get("data", [])
+        ]
+        return {"ok": True, "host": node_cfg["host"], "jobs": jobs, "count": len(jobs)}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@_tool
 def proxmox_vm_start(host: str, vmid: int, confirmed: bool = False) -> dict:
     """
     Start a stopped Proxmox VM or container.
