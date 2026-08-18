@@ -25,24 +25,13 @@ services:
     environment:
       - CONFIG_PATH=/app/config.yaml
 
-  homelab-mcp-ro:
-    build: .
-    container_name: homelab-mcp-ro
-    restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=false"
-      - "diun.enable=false"
-    ports:
-      - "8091:8080"
-    volumes:
-      - ./config.yaml:/app/config.yaml:ro
-      - ./keys:/keys:ro
-    env_file:
-      - /etc/homelab/homelab-mcp.env
-      - /etc/homelab/homelab-mcp-ro.env
-    environment:
-      - CONFIG_PATH=/app/config.yaml
-      - "MCP_ENABLED_TOOLS=list_hosts,docker_ps,docker_stats,docker_logs,docker_network_list,docker_capabilities,docker_restart,loki_query,disk_usage,memory_usage,systemctl_status,systemctl_list,proxmox_vm_list,proxmox_task_status,proxmox_snapshot_list,proxmox_storage_info,read_file,grep_file,tail_file,list_directory,stat_file,rclone_ls,http_get,cloudflare_list_tunnel_routes,cloudflare_list_access_policies,caddy_list_routes,opnsense_list_dhcp_leases,validate_config,ha_get_states,ha_get_state,ha_render_template,ha_get_history,ha_get_logbook,ha_list_automations,homelab_api_get"
+  # homelab-mcp-ro (port 8091, public bearer-auth) decommissioned 2026-08-18 --
+  # its Cloudflare Tunnel route was deleted 2026-06-07 after a credential
+  # spill (see holocron incident-2026-06-07-credential-rotation-spill.md),
+  # but the container itself kept running unnoticed for 5 weeks. Confirmed
+  # dead end-to-end (no Tunnel route, no Access policy, no working TLS) and
+  # rarely used even when it worked, so fully removed rather than repaired.
+  # See holocron artificial-intelligence/claude-mcp/homelab-mcp.md changelog.
 
   # LAN-only, tokenless, read-only instance for untrusted local interfaces
   # (e.g. the Mattermost Agents plugin, whose MCP client treats a 401 as an
