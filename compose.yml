@@ -1,6 +1,6 @@
 # IMPORTANT — GIT WORKFLOW
 # Repo: github.com/mrgibbage/local-mcp-server
-# After any change to tracked files: git -C /srv/local-mcp-server push origin main
+# After any change to tracked files: git -C /srv/local-mcp-server push origin master
 # Then pull in VS Code on Windows (C:/github-projects/local-mcp-server).
 # config.yaml and keys/ are gitignored — edit manually on docker-server only.
 
