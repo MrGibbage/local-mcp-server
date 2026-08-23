@@ -391,17 +391,29 @@ def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60, wrap: bool = True
 
 
 def _run(host: str | None, command: str, timeout: int = 60) -> dict[str, Any]:
-    """Resolve host, run command, return result dict."""
+    """Resolve host, run command, return result dict.
+
+    Host is resolved before the secret-path check so every return path
+    (blocked or not) carries the "host" key — callers uniformly read
+    result["host"], and a blocked-command dict missing it crashes the
+    caller with a bare KeyError('host') instead of a clean ok:false.
+    """
+    host_name, host_cfg = _resolve_host(host)
     for pattern in _SECRET_PATH_PATTERNS:
         if pattern.search(command):
+            # stderr is duplicated from error: most _run callers build their
+            # own "error" field from result["stderr"] (not result["error"]),
+            # so leaving stderr empty here would silently drop this message
+            # for those callers even though the crash itself is fixed.
+            msg = ("blocked: command targets a secret path. "
+                   "Credential files must not be accessed via ssh_exec.")
             return {
                 "stdout": "",
-                "stderr": "",
+                "stderr": msg,
                 "exit_code": 1,
-                "error": f"blocked: command targets a secret path. "
-                         "Credential files must not be accessed via ssh_exec.",
+                "host": host_name,
+                "error": msg,
             }
-    host_name, host_cfg = _resolve_host(host)
     result = _ssh_exec(host_cfg, command, timeout=timeout, wrap=not host_cfg.get("windows", False))
     result["host"] = host_name
     return result

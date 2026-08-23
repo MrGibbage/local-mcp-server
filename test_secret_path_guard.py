@@ -77,3 +77,35 @@ class TestReadFileSecretPathIntegration:
 
         assert "error" not in result
         assert result["content"] == '{"hooks": {}}'
+
+
+# ---------------------------------------------------------------------------
+# _run — a command-string match on _SECRET_PATH_PATTERNS (e.g. a --cookies
+# flag pointing at /run/secrets/...) must still return a "host" key. Every
+# caller of _run (docker_exec, docker_restart, tail_file, ...) unconditionally
+# reads result["host"]; a blocked-command dict missing it raises a bare
+# KeyError('host') that swallows the whole ok/container/host/output/error
+# envelope. Repro: docker_exec(container=..., command="yt-dlp --cookies
+# /run/secrets/youtube-cookies.txt ...") used to blow up the tool call itself
+# instead of returning a clean ok:false.
+# ---------------------------------------------------------------------------
+
+class TestRunSecretPathBlockedResultShape:
+    def test_run_blocked_command_still_returns_host_key(self):
+        result = server._run("docker-server", "cat /run/secrets/youtube-cookies.txt")
+        assert result["host"] == "docker-server"
+        assert result["exit_code"] == 1
+        assert "blocked" in result["error"]
+
+    def test_docker_exec_with_secret_path_in_command_does_not_raise(self):
+        """End-to-end: this must not raise KeyError('host') — it must degrade
+        to a normal ok:false response, same shape as any other failed exec."""
+        result = server.docker_exec(
+            container="music-video-grabber-worker",
+            command="yt-dlp --cookies /run/secrets/youtube-cookies.txt --simulate --no-warnings --print title https://youtu.be/jNQXAC9IVRw",
+            host="docker-server",
+        )
+        assert result["ok"] is False
+        assert result["host"] == "docker-server"
+        assert result["container"] == "music-video-grabber-worker"
+        assert "blocked" in result["error"]
