@@ -4508,7 +4508,16 @@ def _redact_possible_secrets(text: str) -> tuple[str, int]:
     return text, count
 
 
-def _ansible_result(result: dict, redact: bool = False) -> dict:
+def _ansible_result(result: dict, redact: bool = False, max_lines: int = 200) -> dict:
+    """Shared result shaping for every ansible_* tool.
+
+    Order matters: redact against the FULL output first, then truncate —
+    truncating first could throw away a secret before it's ever scanned,
+    defeating the point. Truncation itself matches ssh_exec's convention
+    (keep the tail, since a playbook run's most useful summary — PLAY RECAP,
+    or the end of a long diff — is usually there; set truncated=True so the
+    caller knows lines were dropped). max_lines=0 disables truncation.
+    """
     out = {
         "ok": result["exit_code"] == 0,
         "host": result["host"],
@@ -4528,6 +4537,11 @@ def _ansible_result(result: dict, redact: bool = False) -> dict:
                 "themselves (cd into the ansible repo and re-run the same "
                 "command locally)."
             )
+    if max_lines and out["stdout"]:
+        lines = out["stdout"].splitlines()
+        if len(lines) > max_lines:
+            out["stdout"] = "\n".join(lines[-max_lines:])
+            out["truncated"] = True
     return out
 
 
@@ -4566,7 +4580,8 @@ def ansible_playbook_syntax_check(playbook: str) -> dict:
 
 
 @_tool
-def ansible_playbook_list_tasks(playbook: str, limit: Optional[str] = None) -> dict:
+def ansible_playbook_list_tasks(playbook: str, limit: Optional[str] = None,
+                                 max_lines: int = 200) -> dict:
     """
     Run `ansible-playbook <playbook> --list-tasks`. Shows which tasks and
     which hosts a playbook would touch, without evaluating or running any of
@@ -4576,6 +4591,8 @@ def ansible_playbook_list_tasks(playbook: str, limit: Optional[str] = None) -> d
         playbook: Bare filename from ansible_list_playbooks().
         limit: Optional ansible host/group pattern to restrict to (passed to
                --limit), e.g. "mimas".
+        max_lines: Truncate stdout to this many lines, keeping the tail
+                   (default 200). Use 0 for unlimited.
     """
     try:
         name = _resolve_ansible_playbook(playbook)
@@ -4585,11 +4602,12 @@ def ansible_playbook_list_tasks(playbook: str, limit: Optional[str] = None) -> d
     if limit:
         command += f" --limit {shlex.quote(limit)}"
     result = _ansible_run(command)
-    return _ansible_result(result)
+    return _ansible_result(result, max_lines=max_lines)
 
 
 @_tool
-def ansible_playbook_check(playbook: str, limit: Optional[str] = None) -> dict:
+def ansible_playbook_check(playbook: str, limit: Optional[str] = None,
+                            max_lines: int = 400) -> dict:
     """
     Run `ansible-playbook <playbook> --check --diff` — a dry run. Always
     forces --check --diff server-side; there is no way to make this tool
@@ -4603,12 +4621,19 @@ def ansible_playbook_check(playbook: str, limit: Optional[str] = None) -> dict:
 
     Output is scanned for secret-shaped content (see possible_secrets_redacted
     in the result) and redacted before being returned — if that flag is set,
-    stop and hand it to the user rather than trying to work around it.
+    stop and hand it to the user rather than trying to work around it. That
+    scan runs on the FULL output before truncation, so a secret can't hide in
+    a part that gets cut off.
 
     Args:
         playbook: Bare filename from ansible_list_playbooks().
         limit: Optional ansible host/group pattern to restrict to (passed to
                --limit), e.g. "mimas".
+        max_lines: Truncate stdout to this many lines, keeping the tail —
+                   where PLAY RECAP and the end of a long diff live (default
+                   400; a check/diff run tends to produce more output than a
+                   plain command, hence the higher default than the other
+                   ansible_* tools). Use 0 for unlimited.
     """
     try:
         name = _resolve_ansible_playbook(playbook)
@@ -4618,7 +4643,7 @@ def ansible_playbook_check(playbook: str, limit: Optional[str] = None) -> dict:
     if limit:
         command += f" --limit {shlex.quote(limit)}"
     result = _ansible_run(command, timeout=90)
-    return _ansible_result(result, redact=True)
+    return _ansible_result(result, redact=True, max_lines=max_lines)
 
 
 @_tool
