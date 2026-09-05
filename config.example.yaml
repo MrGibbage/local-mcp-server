@@ -111,6 +111,23 @@ loki:
   url: "http://192.168.1.100:3100"
 
 # ---------------------------------------------------------------------------
+# Ansible — used by the ansible_* tools (ansible_playbook_check,
+# ansible_playbook_syntax_check, ansible_playbook_list_tasks,
+# ansible_inventory, ansible_ping, ansible_collections_list,
+# ansible_list_playbooks). Read-only by design — every ansible_* tool
+# hardcodes its own flags server-side (--check --diff, --syntax-check,
+# --list-tasks, -m ping); there is no parameter that lets a real apply run.
+# ---------------------------------------------------------------------------
+ansible:
+  control_host: docker-server        # a host key from `hosts:` above
+  repo_path: /home/myuser/homelab-ansible   # repo root; must contain a playbooks/ dir
+  # Optional: if ansible was installed via pipx/venv (not a system package), its
+  # bin/ dir usually isn't on the PATH a non-interactive SSH command sees (no
+  # .bashrc sourcing). Set this to that bin dir and it's prepended to PATH for
+  # just the ansible command. Leave unset if `ansible` is on the system PATH.
+  # bin_dir: /home/myuser/.local/bin
+
+# ---------------------------------------------------------------------------
 # Home Assistant light allowlist — ha_light_control will ONLY act on the
 # entity_ids listed here. Any other entity is refused.
 # ---------------------------------------------------------------------------

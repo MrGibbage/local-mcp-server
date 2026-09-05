@@ -4388,6 +4388,279 @@ def holocron_sync_push(host: str, confirmed: bool = False) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Tools — Ansible (read-only: check/diff/list only, never a real apply)
+# ---------------------------------------------------------------------------
+#
+# Deliberately narrow, same model as the holocron tools above: fixed control
+# host + repo path from config.yaml (non-secret routing info), and every
+# command below has its flags hardcoded server-side (--check --diff,
+# --syntax-check, --list-tasks, -m ping) so there is no parameter that lets a
+# real `ansible-playbook playbooks/x.yml` apply slip through. playbook names
+# are validated against a live directory listing (not a hand-maintained
+# allowlist) so this doesn't go stale as playbooks are added/removed, but a
+# name must still resolve to an actual file directly inside playbooks/ — no
+# path segments, no traversal.
+
+_ANSIBLE_PLAYBOOK_NAME_RE = _re.compile(r"^[A-Za-z0-9_-]+\.ya?ml$")
+
+
+def _ansible_cfg() -> dict:
+    cfg = _load_config().get("ansible") or {}
+    if not cfg.get("control_host") or not cfg.get("repo_path"):
+        raise ValueError(
+            "ansible.control_host / ansible.repo_path not configured in config.yaml"
+        )
+    return cfg
+
+
+def _ansible_run(command: str, timeout: int = 60) -> dict:
+    """Run a fixed ansible command in the repo directory on the control host.
+
+    _run wraps everything in `sh -c`, which — unlike an interactive login
+    shell — never sources .bashrc/.profile, so a pipx-installed ansible
+    (~/.local/bin, not on sh's default PATH) would otherwise 404 as "command
+    not found". ansible.bin_dir in config.yaml (optional) is prepended to
+    PATH for just this one command if set — see config.yaml's ansible block.
+    """
+    acfg = _ansible_cfg()
+    repo = acfg["repo_path"]
+    bin_dir = acfg.get("bin_dir")
+    env_prefix = f"PATH={shlex.quote(bin_dir)}:$PATH " if bin_dir else ""
+    full_command = f"cd {shlex.quote(repo)} && {env_prefix}{command}"
+    result = _run(acfg["control_host"], full_command, timeout=timeout)
+    result["command"] = full_command
+    return result
+
+
+def _ansible_playbook_names() -> list[str]:
+    acfg = _ansible_cfg()
+    playbooks_dir = f"{acfg['repo_path'].rstrip('/')}/playbooks"
+    result = _run(acfg["control_host"], f"ls -1 {shlex.quote(playbooks_dir)}")
+    if result["exit_code"] != 0:
+        raise ValueError(
+            f"Could not list playbooks directory '{playbooks_dir}': "
+            f"{result.get('error') or result['stderr']}"
+        )
+    return sorted(
+        line for line in result["stdout"].splitlines()
+        if _ANSIBLE_PLAYBOOK_NAME_RE.match(line)
+    )
+
+
+def _resolve_ansible_playbook(playbook: str) -> str:
+    """Validate playbook is a bare filename that actually exists in
+    playbooks/ right now. Raises ValueError otherwise."""
+    if not _ANSIBLE_PLAYBOOK_NAME_RE.match(playbook) or "/" in playbook:
+        raise ValueError(
+            f"Invalid playbook name '{playbook}' — must be a bare filename "
+            "like 'baseline-packages.yml', no path segments."
+        )
+    names = _ansible_playbook_names()
+    if playbook not in names:
+        raise ValueError(f"Unknown playbook '{playbook}'. Available: {names}")
+    return playbook
+
+
+# Heuristic backstop, not a guarantee — see _redact_possible_secrets.
+_SECRET_PEM_RE = _re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    _re.DOTALL,
+)
+_SECRET_AWS_KEY_RE = _re.compile(r"\bAKIA[0-9A-Z]{16}\b")
+_SECRET_KV_RE = _re.compile(
+    # indent allows an optional leading +/- so this still matches inside a
+    # unified diff (--diff's whole point is showing the *new*, +-prefixed
+    # value — a pattern anchored to plain whitespace would silently miss it).
+    r"(?im)^(?P<indent>[-+ ]?\s*)(?P<key>[\w.-]*"
+    r"(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)"
+    r"[\w.-]*)\s*:\s*(?P<value>\S.*)$"
+)
+# Values already parameterized this way are the safe form these playbooks are
+# moving toward (env-var/vault-backed), not a literal secret — don't flag them.
+_SECRET_SAFE_VALUE_RE = _re.compile(r"\{\{|lookup\(|vault_|ansible_env|\$\{")
+
+
+def _redact_possible_secrets(text: str) -> tuple[str, int]:
+    """Best-effort scan for secret-shaped content in ansible --diff output.
+
+    Heuristic backstop, NOT a guarantee — matches PEM private-key blocks, AWS
+    access key IDs, and `<key containing password/secret/token/...>: <literal
+    value>` lines, skipping values that already look parameterized (Jinja
+    `{{ }}`, `lookup(...)`, `vault_*`, `ansible_env`, `${...}`). Callers must
+    treat a nonzero count as a hard stop: report the redaction to the user
+    and let them inspect the real diff directly — do not try to infer or
+    reconstruct the underlying value from context.
+    """
+    count = 0
+    text, n = _SECRET_PEM_RE.subn("[REDACTED-possible-secret: private key block]", text)
+    count += n
+
+    def _kv_sub(m: _re.Match) -> str:
+        nonlocal count
+        if _SECRET_SAFE_VALUE_RE.search(m.group("value")):
+            return m.group(0)
+        count += 1
+        return f'{m.group("indent")}{m.group("key")}: [REDACTED-possible-secret]'
+
+    text = _SECRET_KV_RE.sub(_kv_sub, text)
+    text, n = _SECRET_AWS_KEY_RE.subn("[REDACTED-possible-secret: AWS key]", text)
+    count += n
+    return text, count
+
+
+def _ansible_result(result: dict, redact: bool = False) -> dict:
+    out = {
+        "ok": result["exit_code"] == 0,
+        "host": result["host"],
+        "exit_code": result["exit_code"],
+        "stdout": result["stdout"],
+        "stderr": result["stderr"],
+    }
+    if redact:
+        out["stdout"], n_out = _redact_possible_secrets(out["stdout"])
+        out["stderr"], n_err = _redact_possible_secrets(out["stderr"])
+        if n_out + n_err:
+            out["possible_secrets_redacted"] = n_out + n_err
+            out["warning"] = (
+                "Output looked like it contained secret-shaped content and "
+                "was redacted. Do not try to guess the underlying value — "
+                "tell the user directly and let them inspect the real output "
+                "themselves (cd into the ansible repo and re-run the same "
+                "command locally)."
+            )
+    return out
+
+
+@_tool
+def ansible_list_playbooks() -> dict:
+    """
+    List the playbooks available in the homelab-ansible repo's playbooks/ dir.
+
+    Read-only. Use this to discover valid names for the `playbook` argument
+    of ansible_playbook_syntax_check / ansible_playbook_list_tasks /
+    ansible_playbook_check.
+    """
+    try:
+        return {"ok": True, "playbooks": _ansible_playbook_names()}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@_tool
+def ansible_playbook_syntax_check(playbook: str) -> dict:
+    """
+    Run `ansible-playbook <playbook> --syntax-check`. Parses the playbook
+    without contacting any managed host or evaluating any task — the
+    cheapest possible sanity check before a real check/diff run.
+
+    Args:
+        playbook: Bare filename from ansible_list_playbooks(), e.g.
+                  "baseline-packages.yml".
+    """
+    try:
+        name = _resolve_ansible_playbook(playbook)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    result = _ansible_run(f"ansible-playbook playbooks/{shlex.quote(name)} --syntax-check")
+    return _ansible_result(result)
+
+
+@_tool
+def ansible_playbook_list_tasks(playbook: str, limit: Optional[str] = None) -> dict:
+    """
+    Run `ansible-playbook <playbook> --list-tasks`. Shows which tasks and
+    which hosts a playbook would touch, without evaluating or running any of
+    them.
+
+    Args:
+        playbook: Bare filename from ansible_list_playbooks().
+        limit: Optional ansible host/group pattern to restrict to (passed to
+               --limit), e.g. "mimas".
+    """
+    try:
+        name = _resolve_ansible_playbook(playbook)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    command = f"ansible-playbook playbooks/{shlex.quote(name)} --list-tasks"
+    if limit:
+        command += f" --limit {shlex.quote(limit)}"
+    result = _ansible_run(command)
+    return _ansible_result(result)
+
+
+@_tool
+def ansible_playbook_check(playbook: str, limit: Optional[str] = None) -> dict:
+    """
+    Run `ansible-playbook <playbook> --check --diff` — a dry run. Always
+    forces --check --diff server-side; there is no way to make this tool
+    apply for real.
+
+    CAVEAT — check mode is not a full simulation: a task using a module that
+    doesn't support check mode (notably ansible.builtin.git, and
+    ansible.builtin.copy with remote_src: true — both used in
+    mimas-service-provisioning.yml) is SKIPPED, not simulated. A clean diff
+    for those tasks means "not evaluated," not "no changes would occur."
+
+    Output is scanned for secret-shaped content (see possible_secrets_redacted
+    in the result) and redacted before being returned — if that flag is set,
+    stop and hand it to the user rather than trying to work around it.
+
+    Args:
+        playbook: Bare filename from ansible_list_playbooks().
+        limit: Optional ansible host/group pattern to restrict to (passed to
+               --limit), e.g. "mimas".
+    """
+    try:
+        name = _resolve_ansible_playbook(playbook)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    command = f"ansible-playbook playbooks/{shlex.quote(name)} --check --diff"
+    if limit:
+        command += f" --limit {shlex.quote(limit)}"
+    result = _ansible_run(command, timeout=90)
+    return _ansible_result(result, redact=True)
+
+
+@_tool
+def ansible_inventory(group: str = "all") -> dict:
+    """
+    Run `ansible-inventory --graph <group>` — show hosts/groups from the
+    homelab-ansible inventory. Read-only.
+
+    Args:
+        group: Inventory group to root the graph at. Default "all".
+    """
+    result = _ansible_run(f"ansible-inventory --graph {shlex.quote(group)}")
+    return _ansible_result(result)
+
+
+@_tool
+def ansible_ping(pattern: str = "all") -> dict:
+    """
+    Run `ansible <pattern> -m ping` — confirm managed hosts are reachable
+    and accept the control node's SSH key. Read-only, no state touched.
+
+    Args:
+        pattern: Ansible host/group pattern, e.g. "all", "mimas",
+                 "docker_hosts". Default "all".
+    """
+    result = _ansible_run(f"ansible {shlex.quote(pattern)} -m ping")
+    return _ansible_result(result)
+
+
+@_tool
+def ansible_collections_list() -> dict:
+    """
+    Run `ansible-galaxy collection list` on the control host. Read-only —
+    useful when a playbook fails with a "module not found" error, to check
+    whether the collection is actually installed before assuming it's a
+    playbook bug.
+    """
+    result = _ansible_run("ansible-galaxy collection list", timeout=30)
+    return _ansible_result(result)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
