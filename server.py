@@ -3967,6 +3967,112 @@ def homelab_api_mutate(
 
 
 # ---------------------------------------------------------------------------
+# Tools — Tailscale device summary (hardcoded to the tailscale api_services
+# entry, GET-only — same "hardcoded service IS the boundary" idea as _seerr_get
+# below, just reshaping one endpoint's response instead of exposing several)
+# ---------------------------------------------------------------------------
+
+
+def _parse_iso8601(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+@_tool
+def tailscale_devices_summary(stale_days: int = 3, expiring_soon_days: int = 14) -> dict:
+    """
+    Summarize tailnet devices for a quick status check (e.g. a weekly sitrep).
+
+    Trims Tailscale's /devices response down to the fields that actually get
+    used — last seen, key expiry, update/auth/connection status — and flags
+    anything worth a second look, instead of returning the full raw payload
+    (which also includes each device's public machine/node/tailnet-lock keys;
+    not secrets, but noise for this purpose).
+
+    Read-only — GET only, same credential-proxy path as homelab_api_get.
+
+    Args:
+        stale_days: Flag a device "stale" if its last-seen is more than this
+                    many days ago (default 3).
+        expiring_soon_days: Flag a device's key "expiring soon" if it expires
+                    within this many days and key expiry isn't disabled
+                    (default 14). Note Tailscale still reports a nominal
+                    `expires` date even when keyExpiryDisabled is true — that
+                    date is cosmetic in that case, so this tool reports
+                    key_expiry as "never" and never flags it for those devices.
+    """
+    try:
+        cfg = _api_svc_cfg("tailscale")
+        url, headers, params, _note = _api_build_request(cfg, "/devices", None)
+        resp = _requests.get(url, headers=headers, params=params, timeout=15, verify=False)
+        result = _api_parse_response(cfg, resp)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"Request failed: {exc}"}
+
+    if not result["ok"]:
+        return {"ok": False, "error": f"Tailscale API returned HTTP {result['status']}",
+                "data": result.get("data")}
+
+    data = result.get("data")
+    devices_raw = data.get("devices", []) if isinstance(data, dict) else []
+    now = datetime.now(timezone.utc)
+    devices = []
+    attention_needed = []
+
+    for d in devices_raw:
+        hostname = d.get("hostname") or d.get("name")
+        last_seen = d.get("lastSeen")
+        last_seen_dt = _parse_iso8601(last_seen)
+        days_since_last_seen = (now - last_seen_dt).days if last_seen_dt else None
+
+        key_disabled = bool(d.get("keyExpiryDisabled"))
+        key_expiry_dt = None if key_disabled else _parse_iso8601(d.get("expires"))
+        key_expires_in_days = (key_expiry_dt - now).days if key_expiry_dt else None
+
+        flags = []
+        if not d.get("connectedToControl", False):
+            flags.append("offline")
+        if days_since_last_seen is not None and days_since_last_seen > stale_days:
+            flags.append(f"stale ({days_since_last_seen}d since last seen)")
+        if key_expires_in_days is not None and key_expires_in_days <= expiring_soon_days:
+            flags.append(f"key expires in {key_expires_in_days}d")
+        if d.get("updateAvailable"):
+            flags.append("update available")
+        if not d.get("authorized", True):
+            flags.append("NOT AUTHORIZED")
+
+        devices.append({
+            "hostname": hostname,
+            "os": d.get("os"),
+            "online": bool(d.get("connectedToControl", False)),
+            "last_seen": last_seen,
+            "days_since_last_seen": days_since_last_seen,
+            "key_expiry": "never" if key_disabled else d.get("expires"),
+            "key_expires_in_days": key_expires_in_days,
+            "update_available": bool(d.get("updateAvailable")),
+            "authorized": bool(d.get("authorized", True)),
+            "client_version": d.get("clientVersion"),
+            "flags": flags,
+        })
+        if flags:
+            attention_needed.append(hostname)
+
+    devices.sort(key=lambda dev: (dev["hostname"] or "").lower())
+    return {
+        "ok": True,
+        "device_count": len(devices),
+        "attention_needed": attention_needed,
+        "devices": devices,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tools — Seerr media requests (hardcoded to seerr only, narrow enough for a
 # broadly-shared bot — same "hardcoded path IS the boundary" model as
 # ha_light_control and the holocron tools below)
