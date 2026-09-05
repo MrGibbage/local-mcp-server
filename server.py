@@ -769,7 +769,8 @@ def docker_inspect(container: str, format: Optional[str] = None, host: Optional[
 
 
 @_tool
-def docker_exec(container: str, command: str, host: Optional[str] = None) -> dict:
+def docker_exec(container: str, command: str, host: Optional[str] = None,
+                 max_lines: int = 200) -> dict:
     """
     Run a command inside a running Docker container.
 
@@ -781,13 +782,23 @@ def docker_exec(container: str, command: str, host: Optional[str] = None) -> dic
         container: Container name or ID.
         command: Command to run inside the container (passed to sh -c).
         host: Named host from config (defaults to default_host).
+        max_lines: Truncate output to this many lines, keeping the tail
+                   (default 200). Use 0 for unlimited.
     """
     try:
         result = _run(host, f"docker exec {container} sh -c {shlex.quote(command)}")
         ok = result["exit_code"] == 0
-        return {"ok": ok, "container": container, "host": result["host"],
-                "output": result["stdout"],
-                **({"error": result["stderr"]} if not ok else {})}
+        output = result["stdout"]
+        out: dict[str, Any] = {"ok": ok, "container": container, "host": result["host"],
+                                "output": output}
+        if max_lines and output:
+            lines = output.splitlines()
+            if len(lines) > max_lines:
+                out["output"] = "\n".join(lines[-max_lines:])
+                out["truncated"] = True
+        if not ok:
+            out["error"] = result["stderr"]
+        return out
     except ValueError as exc:
         return {"ok": False, "container": container, "error": str(exc)}
 
@@ -1489,7 +1500,8 @@ def tail_file(path: str, lines: int = 50, host: Optional[str] = None) -> dict:
 
 
 @_tool
-def grep_file(path: str, pattern: str, host: Optional[str] = None, context: int = 0) -> dict:
+def grep_file(path: str, pattern: str, host: Optional[str] = None, context: int = 0,
+               max_matches: int = 200) -> dict:
     """
     Search for a pattern in a remote file and return matching lines.
 
@@ -1501,12 +1513,18 @@ def grep_file(path: str, pattern: str, host: Optional[str] = None, context: int 
         pattern: Search string or basic regex pattern.
         host: Named host from config (defaults to default_host).
         context: Number of lines to show before and after each match (default 0, max 5).
+        max_matches: Cap matches at this many (default 200, max 2000 — a
+                     generic/unanchored pattern against a huge file can
+                     otherwise match many thousands of times). Passed to
+                     grep -m, which stops the remote grep early rather than
+                     transferring everything and truncating afterward.
     """
     try:
         _check_secret_path(path)
         ctx = min(int(context), 5)
         ctx_flag = f" -C {ctx}" if ctx > 0 else ""
-        result = _run(host, f"grep -n{ctx_flag} {pattern!r} {path}")
+        cap = min(int(max_matches), 2000) if max_matches else 2000
+        result = _run(host, f"grep -n{ctx_flag} -m {cap} {pattern!r} {path}")
         if result["exit_code"] == 1 and not result["stderr"]:
             # exit code 1 with empty stderr = no matches (not an error). On
             # Windows hosts cmd.exe's "not recognized" error also exits 1, but
@@ -1516,12 +1534,21 @@ def grep_file(path: str, pattern: str, host: Optional[str] = None, context: int 
             return {"matches": [], "match_count": 0, "host": result["host"], "path": path}
         if result["exit_code"] != 0:
             return {"ok": False, "error": result["stderr"] or f"grep exited {result['exit_code']}", "host": result["host"], "path": path}
-        return {
-            "matches": result["stdout"].splitlines(),
-            "match_count": len([l for l in result["stdout"].splitlines() if ":" in l]),
+        lines = result["stdout"].splitlines()
+        match_count = len([l for l in lines if ":" in l])
+        out = {
+            "matches": lines,
+            "match_count": match_count,
             "host": result["host"],
             "path": path,
         }
+        if match_count >= cap:
+            out["truncated"] = True
+            out["note"] = (
+                f"Stopped after {cap} matches — there may be more in the "
+                "file. Narrow the pattern or raise max_matches to see further."
+            )
+        return out
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "path": path}
 
