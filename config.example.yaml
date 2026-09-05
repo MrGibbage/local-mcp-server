@@ -46,8 +46,20 @@ hosts:
     #                               # Order by whichever is more often true.
     user: myuser
     key_path: /keys/id_rsa
+    windows: false                 # true if this host runs Windows OpenSSH
     # Optional: enables list_screenshots/get_screenshot for this host.
     # screenshot_dir: 'C:\Users\myuser\Pictures\Screenshots'
+
+  dual-boot-workstation:
+    hostname: 192.168.1.106
+    user: myuser
+    key_path: /keys/id_rsa
+    # For a host that genuinely runs different OSes at different times
+    # (e.g. a dual-boot machine), use `os: auto` instead of a static
+    # windows: true/false. The server probes the live OS over SSH
+    # (`uname -s`) on first use and caches the result for the life of the
+    # process — see server.py's _is_windows_host / _detect_is_windows.
+    os: auto
 
 # Optional: restrict which base commands ssh_exec is allowed to run.
 # Comment out this block (or set to null) to allow all commands.

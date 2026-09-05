@@ -390,6 +390,57 @@ def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60, wrap: bool = True
             client.close()
 
 
+_OS_DETECTION_CACHE: dict[str, bool] = {}  # host_name -> True if Windows
+
+
+def _detect_is_windows(host_name: str, host_cfg: dict) -> bool:
+    """Probe a host over SSH to determine if it's Windows or POSIX right now.
+
+    Only reached for hosts configured with `os: auto` in config.yaml —
+    currently just ganymede, a dual-boot workstation (normally Debian,
+    occasionally booted to Windows for work) where a static windows: true/
+    false is wrong about half the time. Every other host keeps its static
+    flag and never calls this.
+
+    Runs a bare `uname -s` with no shell wrapper — the wrapper itself
+    depends on knowing the OS (see _ssh_exec's wrap param), so this can't go
+    through _ssh_exec. Clean, non-empty stdout with exit 0 means POSIX;
+    cmd.exe/PowerShell don't recognize `uname` and return a non-zero exit
+    with empty stdout, which is treated as Windows.
+
+    Cached in memory for the life of the container process — a mid-session
+    boot switch is rare, and a container restart naturally clears the cache
+    anyway.
+    """
+    if host_name in _OS_DETECTION_CACHE:
+        return _OS_DETECTION_CACHE[host_name]
+    client = None
+    try:
+        client = _ssh_connect(host_cfg)
+        _, stdout, _stderr = client.exec_command("uname -s", timeout=15)
+        exit_code = stdout.channel.recv_exit_status()
+        out = stdout.read().decode("utf-8", errors="replace").strip()
+    finally:
+        if client is not None:
+            client.close()
+    is_windows = not (exit_code == 0 and out)
+    _OS_DETECTION_CACHE[host_name] = is_windows
+    log.info("OS auto-detected", extra={
+        "event": "os_detect", "host": host_name, "windows": is_windows,
+    })
+    return is_windows
+
+
+def _is_windows_host(host_name: str, host_cfg: dict) -> bool:
+    """True if this host should be treated as Windows for command-wrapping
+    and path-separator purposes. `os: auto` hosts (see _detect_is_windows)
+    are probed live and cached; every other host uses its static
+    windows: true/false as before."""
+    if host_cfg.get("os") == "auto":
+        return _detect_is_windows(host_name, host_cfg)
+    return bool(host_cfg.get("windows", False))
+
+
 def _run(host: str | None, command: str, timeout: int = 60) -> dict[str, Any]:
     """Resolve host, run command, return result dict.
 
@@ -414,7 +465,11 @@ def _run(host: str | None, command: str, timeout: int = 60) -> dict[str, Any]:
                 "host": host_name,
                 "error": msg,
             }
-    result = _ssh_exec(host_cfg, command, timeout=timeout, wrap=not host_cfg.get("windows", False))
+    try:
+        is_windows = _is_windows_host(host_name, host_cfg)
+    except Exception as exc:  # noqa: BLE001 — same contract as _ssh_exec's own connect failure
+        return {"stdout": "", "stderr": str(exc), "exit_code": -1, "host": host_name}
+    result = _ssh_exec(host_cfg, command, timeout=timeout, wrap=not is_windows)
     result["host"] = host_name
     return result
 
@@ -1593,9 +1648,9 @@ def list_directory(path: str, host: Optional[str] = None, all: bool = True,
     except ValueError as exc:
         return {"ok": False, "path": path, "error": str(exc)}
 
-    sep = "\\" if host_cfg.get("windows") else "/"
     client = None
     try:
+        sep = "\\" if _is_windows_host(host_name, host_cfg) else "/"
         client = _ssh_connect(host_cfg)
         sftp = client.open_sftp()
         entries = []
@@ -1696,8 +1751,8 @@ def _screenshot_sftp_connect(host_cfg: dict, timeout: int = _SCREENSHOT_CONNECT_
     return client, client.open_sftp()
 
 
-def _screenshot_path(host_cfg: dict, filename: str) -> str:
-    sep = "\\" if host_cfg.get("windows") else "/"
+def _screenshot_path(host_name: str, host_cfg: dict, filename: str) -> str:
+    sep = "\\" if _is_windows_host(host_name, host_cfg) else "/"
     return f"{host_cfg['screenshot_dir'].rstrip(sep)}{sep}{filename}"
 
 
@@ -1859,7 +1914,7 @@ def get_screenshot(filename: Optional[str] = None, host: Optional[str] = None,
             client = None
             try:
                 client, sftp = _screenshot_sftp_connect(cfg)
-                sftp.stat(_screenshot_path(cfg, filename))
+                sftp.stat(_screenshot_path(h, cfg, filename))
                 _SCREENSHOT_UNREACHABLE.pop(h, None)
                 found.append(h)
             except FileNotFoundError:
@@ -1878,9 +1933,10 @@ def get_screenshot(filename: Optional[str] = None, host: Optional[str] = None,
         host_name = found[0]
 
     host_cfg = dict(_screenshot_hosts())[host_name]
-    target_path = _screenshot_path(host_cfg, filename)
     client = None
+    target_path = None
     try:
+        target_path = _screenshot_path(host_name, host_cfg, filename)
         client, sftp = _screenshot_sftp_connect(host_cfg)
         with sftp.file(target_path, "rb") as f:
             raw = f.read()
@@ -4198,20 +4254,42 @@ _HOLOCRON_HOSTS: dict[str, dict[str, Any]] = {
         "windows": False,
     },
     "ganymede": {
-        "repo": r"C:\srv\holocron",
-        "sync_script": r"C:\Users\skip\.claude\hooks\holocron-sync.ps1",
-        "windows": True,
+        # Dual-boot: repo/sync_script live at different paths depending on
+        # which OS is currently booted (confirmed 2026-09-05 — Debian boot
+        # uses the same /home/skip layout as docker-server/smavm). Resolved
+        # at call time via _is_windows_host(); see _resolve_holocron_host.
+        "os": "auto",
+        "linux": {
+            "repo": "/home/skip/holocron",
+            "sync_script": "/home/skip/bin/holocron-sync.sh",
+        },
+        "windows": {
+            "repo": r"C:\srv\holocron",
+            "sync_script": r"C:\Users\skip\.claude\hooks\holocron-sync.ps1",
+        },
     },
 }
 
 
 def _resolve_holocron_host(host: str) -> dict[str, Any]:
-    hc = _HOLOCRON_HOSTS.get(host)
-    if hc is None:
+    """Return {repo, sync_script, windows} for a holocron host.
+
+    For a static host this is just the configured dict. For an `os: auto`
+    host (ganymede), probes the live boot OS via _is_windows_host and
+    returns the matching repo/sync_script variant merged with the resolved
+    windows bool.
+    """
+    entry = _HOLOCRON_HOSTS.get(host)
+    if entry is None:
         raise ValueError(
             f"Unknown holocron host '{host}'. Valid: {list(_HOLOCRON_HOSTS)}"
         )
-    return hc
+    if entry.get("os") == "auto":
+        _, host_cfg = _resolve_host(host)
+        is_windows = _is_windows_host(host, host_cfg)
+        variant = entry["windows"] if is_windows else entry["linux"]
+        return {**variant, "windows": is_windows}
+    return entry
 
 
 @_tool
