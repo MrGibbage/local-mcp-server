@@ -390,7 +390,8 @@ def _ssh_exec(host_cfg: dict, command: str, timeout: int = 60, wrap: bool = True
             client.close()
 
 
-_OS_DETECTION_CACHE: dict[str, bool] = {}  # host_name -> True if Windows
+_OS_DETECTION_CACHE: dict[str, tuple[bool, float]] = {}  # host_name -> (is_windows, checked_at)
+_OS_DETECTION_TTL = 600  # seconds
 
 
 def _detect_is_windows(host_name: str, host_cfg: dict) -> bool:
@@ -408,12 +409,17 @@ def _detect_is_windows(host_name: str, host_cfg: dict) -> bool:
     cmd.exe/PowerShell don't recognize `uname` and return a non-zero exit
     with empty stdout, which is treated as Windows.
 
-    Cached in memory for the life of the container process — a mid-session
-    boot switch is rare, and a container restart naturally clears the cache
-    anyway.
+    Cached for _OS_DETECTION_TTL seconds, not for the life of the container
+    process — ganymede flips between Debian and Windows multiple times a
+    week (see CLAUDE.md shell notes), while the container itself can stay up
+    for days, so a process-lifetime cache goes stale far more often than a
+    "rare mid-session boot switch" would suggest. Re-probing every 10 minutes
+    costs one cheap extra `uname -s` round-trip on a cache miss, only for
+    this one host.
     """
-    if host_name in _OS_DETECTION_CACHE:
-        return _OS_DETECTION_CACHE[host_name]
+    cached = _OS_DETECTION_CACHE.get(host_name)
+    if cached is not None and (time.monotonic() - cached[1]) < _OS_DETECTION_TTL:
+        return cached[0]
     client = None
     try:
         client = _ssh_connect(host_cfg)
@@ -424,7 +430,7 @@ def _detect_is_windows(host_name: str, host_cfg: dict) -> bool:
         if client is not None:
             client.close()
     is_windows = not (exit_code == 0 and out)
-    _OS_DETECTION_CACHE[host_name] = is_windows
+    _OS_DETECTION_CACHE[host_name] = (is_windows, time.monotonic())
     log.info("OS auto-detected", extra={
         "event": "os_detect", "host": host_name, "windows": is_windows,
     })
