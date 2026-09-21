@@ -998,7 +998,10 @@ def http_get(url: str, expected_status: Optional[int] = None, host: Optional[str
     try:
         if host:
             header_flags = "".join(f" -H {shlex.quote(k + ': ' + v)}" for k, v in (headers or {}).items())
-            result = _run(host, f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 10{header_flags} {url!r}")
+            # shlex.quote, matching header_flags above — {!r} is Python repr, not a
+            # shell quoter, and emits DOUBLE quotes for anything containing a single
+            # quote, which would let the shell expand $... and backticks in the URL.
+            result = _run(host, f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 10{header_flags} {shlex.quote(url)}")
             if result["exit_code"] != 0:
                 return {"ok": False, "url": url, "host": result["host"],
                         "error": result["stderr"] or result["stdout"]}
@@ -1516,7 +1519,7 @@ def grep_file(path: str, pattern: str, host: Optional[str] = None, context: int 
 
     Args:
         path: Absolute path to the file on the remote host.
-        pattern: Search string or basic regex pattern.
+        pattern: Search string or extended regex (ERE) — `a|b` alternation works.
         host: Named host from config (defaults to default_host).
         context: Number of lines to show before and after each match (default 0, max 5).
         max_matches: Cap matches at this many (default 200, max 2000 — a
@@ -1530,7 +1533,17 @@ def grep_file(path: str, pattern: str, host: Optional[str] = None, context: int 
         ctx = min(int(context), 5)
         ctx_flag = f" -C {ctx}" if ctx > 0 else ""
         cap = min(int(max_matches), 2000) if max_matches else 2000
-        result = _run(host, f"grep -n{ctx_flag} -m {cap} {pattern!r} {path}")
+        # -E (ERE), not plain grep (BRE). In BRE `|` is a LITERAL pipe, so an
+        # ordinary `a|b` alternation silently matched nothing and returned
+        # {"matches": [], "match_count": 0} — indistinguishable from a genuine
+        # no-match. Found 2026-09-21 by holocron-audit, which reported that
+        # patterns using `|` simply didn't match and fell back to shell grep.
+        #
+        # shlex.quote, not {!r}. Python's repr is not a shell quoter: it doubles
+        # backslashes (so the BRE workaround `a\|b` was broken too), and for a
+        # pattern containing a single quote it emits DOUBLE quotes, which lets
+        # the shell expand the contents — `it's $HOME` became `it's /home/skip`.
+        result = _run(host, f"grep -nE{ctx_flag} -m {cap} {shlex.quote(pattern)} {shlex.quote(path)}")
         if result["exit_code"] == 1 and not result["stderr"]:
             # exit code 1 with empty stderr = no matches (not an error). On
             # Windows hosts cmd.exe's "not recognized" error also exits 1, but
