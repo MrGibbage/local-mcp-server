@@ -197,6 +197,30 @@ def _command_segments(command: str) -> list[list[str]]:
     return segments
 
 
+def _check_shell_constructs(command: str) -> None:
+    """Reject command/process substitution, which runs commands the allowlist never sees.
+
+    The allowlist only inspects the first word of each chained segment, so
+    `echo $(anything)`, `echo `anything`` and `cat <(anything)` all passed with
+    just `echo`/`cat` listed (found 2026-09-26). These are refused anywhere
+    outside single quotes -- they execute inside double quotes too.
+
+    Output redirection is deliberately NOT blocked: allowlisted verbs already
+    write files (`sed -i`, `mv`, `curl -o`), and real work on hosts only
+    ssh_exec can reach (Home Assistant config edits, Proxmox ISO downloads)
+    relies on it. Note this does not make the allowlist a security boundary --
+    `ssh`, `docker` and `find -exec` are allowlisted and can each run anything.
+    It is a guard against mistakes; see homelab-mcp.md TODO0.
+    """
+    unquoted = _re.sub(r"'[^']*'", "''", command)
+    for construct in ("$(", "`", "<(", ">("):
+        if construct in unquoted:
+            raise ValueError(
+                f"Shell construct '{construct}' is not allowed in ssh_exec commands: "
+                "it would run a command the allowlist never checks."
+            )
+
+
 def _check_allowlist(command: str, host_cfg: dict | None = None) -> None:
     """Raise ValueError if any chained sub-command's base is not allowlisted.
 
@@ -210,6 +234,7 @@ def _check_allowlist(command: str, host_cfg: dict | None = None) -> None:
     host_extra: list[str] = (host_cfg or {}).get("ssh_command_allowlist", [])
     if global_allow is None and not host_extra:
         return
+    _check_shell_constructs(command)
     effective: list[str] = (global_allow or []) + host_extra
     for segment in _command_segments(command):
         if not segment:
@@ -572,12 +597,15 @@ def ssh_exec(command: str, host: Optional[str] = None, max_lines: int = 200,
     """
     Run an arbitrary shell command on a named host via SSH.
 
-    IMPORTANT: Before using ssh_exec for Docker, file, or system operations, first check
-    whether a dedicated MCP tool exists. This server has 60+ specialized tools (docker_ps,
-    docker_inspect, list_directory, stat_file, read_file, grep_file, etc.) that are deferred
-    and only visible after a ToolSearch call. Example: ToolSearch(query="docker inspect stat")
-    loads docker_inspect, stat_file, list_directory, etc. Use ssh_exec only when no dedicated
-    MCP tool covers your specific need.
+    Use this for hosts your own session can't reach directly (typically proxmox1,
+    proxmox2, homeassistant, ganymede, phobos -- this server holds their SSH keys).
+    If you are running on docker-server, use your own shell there and plain
+    `ssh smavm` for Mimas instead. Some instances disable the docker_*/file tools
+    (MCP_ENABLED_TOOLS), so don't assume a dedicated tool exists -- check the
+    tool list rather than going looking for one.
+
+    Command and process substitution (`$(...)`, backticks, `<(...)`) are refused
+    outside single quotes: they would run commands the allowlist never checks.
 
     Returns stdout, stderr, exit_code, host, and command. The remote command is
     wrapped in `timeout --kill-after=5 <timeout>` so runaway processes are
