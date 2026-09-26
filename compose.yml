@@ -18,8 +18,10 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./keys:/keys:ro
       - /var/run/docker.sock:/var/run/docker.sock
-      - /mnt/windows/holocron:/mnt/windows/holocron:rw
-      - /mnt/windows/claude:/mnt/windows/claude:ro
+      # /mnt/windows/{holocron,claude} CIFS bind mounts removed 2026-09-23 --
+      # the Ganymede shares were decommissioned (holocron share gone entirely,
+      # Ganymede now dual-boots Debian). Both paths were empty inside this
+      # container anyway. See holocron/docker-server/infrastructure/windows-smb-mounts.md
     env_file:
       - /etc/homelab/homelab-mcp.env
     environment:
