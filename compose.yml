@@ -26,6 +26,15 @@ services:
       - /etc/homelab/homelab-mcp.env
     environment:
       - CONFIG_PATH=/app/config.yaml
+      # Slimmed 2026-09-26 to tools that need credentials or reach local Bash
+      # on docker-server doesn't have: the API proxy, Cloudflare, OPNsense,
+      # Proxmox, Home Assistant, Tailscale, Loki, screenshots, holocron sync on
+      # the Windows hosts, and ssh_exec for hosts skip can't SSH to. The
+      # docker_*/file/systemctl/ansible tools duplicated local Bash and are
+      # disabled here, not deleted -- remove this line to restore them all.
+      # The bot instances below keep their own lists. See holocron
+      # artificial-intelligence/claude-mcp/homelab-mcp.md.
+      - "MCP_ENABLED_TOOLS=list_hosts,ssh_exec,homelab_api_get,homelab_api_post,homelab_api_mutate,cloudflare_list_tunnel_routes,cloudflare_add_tunnel_route,cloudflare_remove_tunnel_route,cloudflare_list_access_policies,cloudflare_add_access_policy,caddy_list_routes,caddy_add_route,caddy_remove_route,opnsense_read_file,opnsense_list_dhcp_leases,proxmox_vm_list,proxmox_snapshot_list,proxmox_snapshot_create,proxmox_snapshot_delete,proxmox_task_status,proxmox_storage_info,proxmox_list_backup_jobs,proxmox_vm_start,proxmox_vm_stop,ha_get_states,ha_get_state,ha_call_service,ha_light_control,ha_render_template,ha_get_history,ha_get_logbook,ha_list_automations,ha_trigger_automation,tailscale_devices_summary,list_screenshots,get_screenshot,loki_query,holocron_git_status,holocron_sync_push"
 
   # homelab-mcp-ro (port 8091, public bearer-auth) decommissioned 2026-08-18 --
   # its Cloudflare Tunnel route was deleted 2026-06-07 after a credential
