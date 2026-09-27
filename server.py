@@ -1767,7 +1767,7 @@ def list_directory(path: str, host: Optional[str] = None, all: bool = True,
 # ---------------------------------------------------------------------------
 #
 # Screenshots are taken on Windows laptops/desktops (ganymede, phobos) but
-# Claude sessions can run on any host (docker-server, smavm, or natively on
+# Claude sessions can run on any host (docker-server, or natively on
 # ganymede/phobos), and the physical machine being typed on doesn't have to
 # match the machine the session runs on. So these tools never assume "local
 # file" — they always fetch over SFTP from whichever configured host(s) have
@@ -4428,15 +4428,13 @@ _HOLOCRON_HOSTS: dict[str, dict[str, Any]] = {
         "sync_script": "/home/skip/bin/holocron-sync.sh",
         "windows": False,
     },
-    "smavm": {
-        "repo": "/home/skip/holocron",
-        "sync_script": "/home/skip/bin/holocron-sync.sh",
-        "windows": False,
-    },
+    # No "smavm"/"mimas" entry: Mimas (the 2026-08-30 rebuild of smavm) runs no
+    # Claude CLI and deliberately has no holocron clone, so the old entry pointed
+    # at a path that doesn't exist (removed 2026-09-27).
     "ganymede": {
         # Dual-boot: repo/sync_script live at different paths depending on
         # which OS is currently booted (confirmed 2026-09-05 — Debian boot
-        # uses the same /home/skip layout as docker-server/smavm). Resolved
+        # uses the same /home/skip layout as docker-server). Resolved
         # at call time via _is_windows_host(); see _resolve_holocron_host.
         "os": "auto",
         "linux": {
@@ -4483,7 +4481,7 @@ def holocron_git_status(host: str) -> dict:
     repo (in particular, never the separate .claude/Claude-config repo).
 
     Args:
-        host: One of "docker-server", "smavm", "ganymede".
+        host: One of "docker-server", "ganymede".
     """
     try:
         hc = _resolve_holocron_host(host)
@@ -4532,7 +4530,7 @@ def holocron_sync_push(host: str, confirmed: bool = False) -> dict:
     ask — do not infer.
 
     Args:
-        host: One of "docker-server", "smavm", "ganymede".
+        host: One of "docker-server", "ganymede".
         confirmed: Must be True to execute. Default False blocks the action.
     """
     if not confirmed:
