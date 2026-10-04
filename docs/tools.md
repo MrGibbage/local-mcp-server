@@ -100,6 +100,7 @@ rather than retried on every call — see [configuration.md](configuration.md).
 | `ha_get_history` / `ha_get_logbook` | History and logbook |
 | `ha_render_template` | Render a Jinja template |
 | `ha_list_automations` / `ha_trigger_automation` | List / fire automations |
+| `ha_list_repairs` | Live Repairs list (websocket, read-only) — not the stale `.storage` registry file |
 | `ha_call_service` | Call any HA service |
 | `ha_light_control` | Scoped, whitelisted light control |
 

@@ -3717,6 +3717,54 @@ def ha_list_automations() -> dict:
 
 
 @_tool
+def ha_list_repairs(include_ignored: bool = False) -> dict:
+    """
+    List Home Assistant Repairs issues (Settings → System → Repairs).
+
+    Read-only. Uses the websocket API (repairs/list_issues) since Repairs has
+    no REST endpoint. Requires HA_TOKEN to belong to an admin user.
+
+    Don't substitute /config/.storage/repairs.issue_registry for this -- that
+    file keeps stale entries for dismissal tracking (50+ on 2026-10-04 when
+    the live list had 1).
+
+    Args:
+        include_ignored: Also return issues the user has ignored/dismissed.
+    """
+    try:
+        from websockets.sync.client import connect
+
+        svc = _load_config().get("api_services", {}).get("homeassistant", {})
+        base_url = svc.get("base_url", "").rstrip("/")
+        token = os.environ.get("HA_TOKEN", "")
+        if not base_url or not token:
+            raise ValueError("homeassistant.base_url or HA_TOKEN not configured")
+        ws_url = base_url.replace("https://", "wss://").replace("http://", "ws://") + "/websocket"
+        with connect(ws_url, open_timeout=10, close_timeout=5) as ws:
+            ws.recv(timeout=10)  # auth_required
+            ws.send(json.dumps({"type": "auth", "access_token": token}))
+            if json.loads(ws.recv(timeout=10)).get("type") != "auth_ok":
+                return {"ok": False, "error": "HA websocket auth failed"}
+            ws.send(json.dumps({"id": 1, "type": "repairs/list_issues"}))
+            resp = json.loads(ws.recv(timeout=15))
+        if not resp.get("success"):
+            return {"ok": False, "error": str(resp.get("error"))}
+        keep = ("domain", "issue_id", "severity", "created", "is_fixable",
+                "ignored", "breaks_in_ha_version", "learn_more_url",
+                "translation_key", "translation_placeholders")
+        issues = [
+            {k: i.get(k) for k in keep}
+            for i in resp["result"]["issues"]
+            if include_ignored or not i.get("ignored")
+        ]
+        return {"ok": True, "count": len(issues), "issues": issues}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:  # websockets raises its own exception types
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+@_tool
 def ha_trigger_automation(automation_id: str, confirmed: bool = False) -> dict:
     """
     Trigger a Home Assistant automation by entity id (runs its actions now).
