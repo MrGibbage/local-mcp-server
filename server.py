@@ -3899,23 +3899,53 @@ def _api_secrets(cfg: dict) -> list[str]:
     return [token] if token else []
 
 
+# Credential-bearing query parameters inside URLs that appear in a response
+# body. _api_secrets() only knows the proxy's OWN transport credential; this
+# catches third-party credentials a service stores and echoes back -- e.g.
+# Sonarr /history's downloadUrl carries the indexer's key (NZBgeek
+# `apikey=...`, Drunken Slug `r=...` -- newznab's getnzb key param). Leaked
+# both on 2026-10-04, see holocron incident-2026-10-04-indexer-api-key-spill.
+# The separator also matches `\u0026`: .NET's System.Text.Json (the *arr
+# apps) escapes `&` that way in raw JSON. Deliberately broad -- a false
+# positive just blanks a harmless value in a response Claude reads.
+_URL_CRED_PARAM_RE = _re.compile(
+    r"(?i)((?:[?&]|\\u0026)"
+    r"(?:api_?key|apitoken|access_token|token|x-plex-token|passkey|"
+    r"secret|password|passwd|pass|auth|key|r)=)"
+    r"([^&\"'\s\\<>]+)"
+)
+
+
+def _redact_url_credentials(text: str) -> tuple[str, int]:
+    """Blank credential query params in any URL inside text. Returns (text, count)."""
+    return _URL_CRED_PARAM_RE.subn(r"\1[REDACTED-BY-PROXY]", text)
+
+
 def _api_parse_response(cfg: dict, resp) -> dict:
-    """Parse an upstream HTTP response, scrubbing live credentials from the body.
+    """Parse an upstream HTTP response, scrubbing credentials from the body.
 
     Some services echo the caller's own API key or token back in their JSON
     response body — even on read-only endpoints (confirmed: Seerr /settings/main,
     ntfy /v1/account).  Scrubbing on the raw text before JSON parsing guarantees
     the live secret never reaches the MCP caller regardless of which endpoint is
     called, present or future.
+
+    Separately, URL query params that look like credentials are blanked
+    (_redact_url_credentials) -- those belong to OTHER services the upstream
+    app talks to (indexers, download clients), which _api_secrets can't know.
     """
     raw = resp.text
     for secret in _api_secrets(cfg):
         raw = raw.replace(secret, "[REDACTED-BY-PROXY]")
+    raw, n_url = _redact_url_credentials(raw)
     try:
         data = json.loads(raw)
     except Exception:
         data = raw
-    return {"ok": resp.ok, "status": resp.status_code, "data": data}
+    result = {"ok": resp.ok, "status": resp.status_code, "data": data}
+    if n_url:
+        result["url_credentials_redacted"] = n_url
+    return result
 
 
 @_tool
