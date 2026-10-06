@@ -4052,7 +4052,9 @@ def homelab_api_mutate(
         service: Service name from api_services config.
         method: HTTP method — "PUT", "PATCH", or "DELETE".
         path: API path starting with /.
-        body: Optional JSON request body (ignored for DELETE).
+        body: Optional JSON request body. PUT/PATCH send {} when omitted; DELETE
+              sends no body when omitted and the given JSON when provided
+              (e.g. *arr bulk endpoints: DELETE /queue/bulk {"ids": [...]}).
         confirmed: Set True only after the user has explicitly confirmed this specific
                    destructive operation in the current conversation.
     """
@@ -4072,7 +4074,15 @@ def homelab_api_mutate(
         url, headers, resolved_params, note = _api_build_request(cfg, path, {})
         headers["Content-Type"] = "application/json"
         if method == "DELETE":
-            resp = _requests.delete(url, headers=headers, params=resolved_params, timeout=15, verify=False)
+            # *arr bulk endpoints (DELETE /queue/bulk, /blocklist/bulk, ...) need a
+            # JSON body; other servers reject DELETE with any body, so send none
+            # unless one was given (an explicit {} is still sent).
+            extra = {"json": body} if body is not None else {}
+            if body is None:
+                headers.pop("Content-Type", None)
+            resp = _requests.delete(
+                url, headers=headers, params=resolved_params, timeout=15, verify=False, **extra
+            )
         elif method == "PUT":
             resp = _requests.put(
                 url, headers=headers, params=resolved_params, json=body or {}, timeout=15, verify=False
