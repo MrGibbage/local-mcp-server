@@ -3858,13 +3858,25 @@ def _api_normalize_path(base_url: str, path: str) -> tuple[str, Optional[str]]:
     return path, None
 
 
+def _api_query_value(v):
+    """Render a query param value the way JSON-minded APIs expect."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (list, tuple)):
+        return [_api_query_value(x) for x in v]
+    return v
+
+
 def _api_build_request(cfg: dict, path: str, params: dict | None) -> tuple[str, dict, dict, Optional[str]]:
     """Return (url, headers, params_dict, note) with auth injected."""
     base_url = cfg["base_url"].rstrip("/")
     path, note = _api_normalize_path(base_url, path)
     url = base_url + path
     headers: dict = {}
-    params = dict(params or {})
+    # requests renders a Python bool as "True"/"False", which strict APIs
+    # reject (n8n: 'Invalid enum value. Expected 'true' | 'false', received
+    # 'True'', 2026-10-07). Send JSON-style lowercase, including inside lists.
+    params = {k: _api_query_value(v) for k, v in (params or {}).items()}
     style = cfg.get("auth_style", "header")
     token = cfg["_token"]
 
