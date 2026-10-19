@@ -164,6 +164,17 @@ api_services:
     auth_env: SABNZBD_API_KEY
     # No post_allowlist — SABnzbd uses GET ?mode= for everything
 
+  # --- Bazarr (read-only, with a path_denylist) ---
+  # path_denylist refuses every method on these paths (and anything below
+  # them): responses that carry credentials the proxy can't redact.
+  bazarr:
+    base_url: http://192.168.1.100:6767/api
+    auth_style: header
+    auth_header: X-API-KEY
+    auth_env: BAZARR_API_KEY
+    path_denylist:
+      - /system/settings      # subtitle-provider logins
+
   # --- Grafana (bearer token, read-only via Claude) ---
   grafana:
     base_url: http://192.168.1.101:3000/api

@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import os
+import posixpath as _posixpath
 import re as _re
 import shlex
 import stat as _stat
@@ -21,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote as _url_quote
+from urllib.parse import unquote as _url_unquote
 from urllib.parse import urlparse as _urlparse
 
 import paramiko
@@ -3858,6 +3860,49 @@ def _api_normalize_path(base_url: str, path: str) -> tuple[str, Optional[str]]:
     return path, None
 
 
+def _api_canonical_path(path: str) -> str:
+    """Reduce a request path to the route the upstream server will dispatch.
+
+    Used only for path_denylist matching, so it errs toward collapsing
+    anything a router might treat as equivalent: repeated percent-decoding
+    ("%2573" -> "%73" -> "s"), query/fragment dropped, backslashes and
+    repeated slashes folded, "." / ".." resolved, case and trailing slash
+    ignored.
+    """
+    p = path
+    for _ in range(5):
+        decoded = _url_unquote(p)
+        if decoded == p:
+            break
+        p = decoded
+    p = _re.split(r"[?#]", p, maxsplit=1)[0]
+    p = _re.sub(r"/+", "/", "/" + p.replace("\\", "/"))
+    p = _posixpath.normpath(p)
+    return p.lower().rstrip("/") or "/"
+
+
+def _api_check_denylist(cfg: dict, path: str) -> None:
+    """Raise ValueError if path falls under the service's path_denylist.
+
+    For endpoints whose response carries credentials the proxy cannot redact
+    because it doesn't hold them -- e.g. Bazarr /system/settings returns the
+    subtitle-provider logins and cookies (2026-10-19). Applies to every
+    method, and an entry also denies everything below it.
+    """
+    denylist: list[str] = cfg.get("path_denylist", [])
+    if not denylist:
+        return
+    canon = _api_canonical_path(path)
+    for entry in denylist:
+        deny = _api_canonical_path(entry)
+        if canon == deny or canon.startswith(deny.rstrip("/") + "/"):
+            raise ValueError(
+                f"Path '{path}' is blocked by path_denylist (matched '{entry}'): "
+                "its response contains credentials the proxy cannot redact. "
+                "Use the service's own UI for it."
+            )
+
+
 def _api_query_value(v):
     """Render a query param value the way JSON-minded APIs expect."""
     if isinstance(v, bool):
@@ -3871,6 +3916,7 @@ def _api_build_request(cfg: dict, path: str, params: dict | None) -> tuple[str, 
     """Return (url, headers, params_dict, note) with auth injected."""
     base_url = cfg["base_url"].rstrip("/")
     path, note = _api_normalize_path(base_url, path)
+    _api_check_denylist(cfg, path)
     url = base_url + path
     headers: dict = {}
     # requests renders a Python bool as "True"/"False", which strict APIs

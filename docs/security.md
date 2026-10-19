@@ -58,6 +58,9 @@ The toolset is read-biased by default:
   is in that service's `post_allowlist`; `PUT`/`PATCH`/`DELETE` require the
   caller to pass `confirmed=true` through the separate `homelab_api_mutate`
   tool. A freshly added service is read-only until you opt into specific writes.
+  Paths in a service's `path_denylist` are refused for every method — for
+  endpoints that return credentials the proxy can't redact because it doesn't
+  hold them.
 - **SSH:** an optional `ssh_command_allowlist` (global and/or per-host)
   restricts `ssh_exec` to a set of base commands. `ssh_exec` also blocks access
   to known secret paths.

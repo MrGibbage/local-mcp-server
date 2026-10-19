@@ -205,6 +205,23 @@ path is in `post_allowlist`. `PUT`/`PATCH`/`DELETE` go through a separate
 `homelab_api_mutate` tool that requires an explicit `confirmed=true`. This means
 adding a service is read-only by default — you opt into writes path by path.
 
+**Secret-bearing endpoints:** the proxy scrubs its own credential (and
+credential-shaped URL params) from responses, but it can't redact secrets it
+doesn't hold — e.g. a settings endpoint that returns the app's logins to *other*
+services. List those paths in `path_denylist` and every method is refused before
+any request is sent. An entry also covers everything below it, and matching
+ignores case, percent-encoding, repeated slashes, `.`/`..` and query strings:
+
+```yaml
+  bazarr:
+    base_url: http://192.168.1.100:6767/api
+    auth_style: header
+    auth_header: X-API-KEY
+    auth_env: BAZARR_API_KEY
+    path_denylist:
+      - /system/settings   # returns subtitle-provider passwords
+```
+
 ## SSH command allowlist
 
 `ssh_exec` runs shell commands on a host. You can restrict it to a set of base
