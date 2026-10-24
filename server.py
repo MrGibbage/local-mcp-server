@@ -3267,13 +3267,35 @@ def cloudflare_remove_tunnel_route(hostname: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _cf_access_app_hostnames(app: dict) -> list[str]:
+    """Every hostname an Access app protects: primary `domain`, legacy
+    `self_hosted_domains`, and public `destinations` URIs, de-duplicated in
+    that order. `domain` alone misses secondary destinations ("+N other
+    domains" in the dashboard) -- see skill-lessons 2026-09-27."""
+    names = [app.get("domain")]
+    names += app.get("self_hosted_domains") or []
+    names += [
+        d.get("uri")
+        for d in app.get("destinations") or []
+        if d.get("type", "public") == "public"
+    ]
+    seen: list[str] = []
+    for n in names:
+        if n and n not in seen:
+            seen.append(n)
+    return seen
+
+
 @_tool
 def cloudflare_list_access_policies() -> dict:
     """
     List all Cloudflare Access applications and their associated policies.
 
-    Returns each application's name, domain, session duration, and a summary
-    of its allow/block policies including which identities are permitted.
+    Returns each application's name, primary domain, every hostname it
+    protects (`hostnames`, including secondary destinations, with the
+    non-primary ones also in `other_domains`), session duration, and a
+    summary of its allow/block policies including which identities are
+    permitted.
     """
     try:
         account_id, headers = _cf_access_cfg()
@@ -3306,10 +3328,13 @@ def cloudflare_list_access_policies() -> dict:
                 }
                 for p in pol_data.get("result", [])
             ]
+            hostnames = _cf_access_app_hostnames(app)
             apps.append({
                 "id": app_id,
                 "name": app.get("name"),
                 "domain": app.get("domain"),
+                "hostnames": hostnames,
+                "other_domains": [h for h in hostnames if h != app.get("domain")],
                 "session_duration": app.get("session_duration"),
                 "policies": policies,
             })
