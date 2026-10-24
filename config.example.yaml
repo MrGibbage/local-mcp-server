@@ -136,6 +136,18 @@ ha_light_allowlist:
   - light.kitchen
 
 # ---------------------------------------------------------------------------
+# zigbee_coordinator_reboot — power-cycles a network Zigbee coordinator via a
+# smart plug, waits for its TCP port, then restarts the Zigbee2MQTT add-on.
+# The tool takes no arguments; it acts only on these values.
+# ---------------------------------------------------------------------------
+zigbee_coordinator:
+  power_switch: switch.coordinator_plug
+  host: 192.168.1.50
+  port: 6638
+  z2m_addon: 45df7312_zigbee2mqtt
+  bridge_entity: binary_sensor.zigbee2mqtt_bridge_connection_state
+
+# ---------------------------------------------------------------------------
 # Homelab API proxy — credentials come from env vars, never here.
 # Add a new service: append a block, add the env var to your env file, restart.
 # To verify a new service: homelab_api_get("<service>", "/system/status")

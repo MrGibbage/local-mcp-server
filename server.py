@@ -3612,6 +3612,105 @@ def ha_light_control(
         return {"ok": False, "error": str(exc), "entity_id": entity_id}
 
 
+_ZIGBEE_REBOOT_COOLDOWN_S = 600
+_zigbee_last_reboot: float | None = None
+
+
+def _tcp_port_open(host: str, port: int, timeout: float = 2.0) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _ha_service(domain: str, service: str, data: dict) -> None:
+    _ha_request("POST", f"/services/{domain}/{service}", json=data)
+
+
+@_tool
+def zigbee_coordinator_reboot() -> dict:
+    """
+    Reboot the Zigbee coordinator (tubesZB) and bring Zigbee2MQTT back.
+
+    Use when the Zigbee2MQTT bridge is disconnected and the coordinator is the
+    likely cause (e.g. after a proxmox2/HA VM reboot), or when the user asks.
+    Takes no arguments: it acts ONLY on the `zigbee_coordinator` block in
+    config.yaml, so it cannot be pointed at any other device or add-on.
+
+    Steps: turn the coordinator's power plug off, wait 10 s, turn it on (always
+    attempted, even if an earlier step failed), wait up to 60 s for the
+    coordinator's TCP port, restart the Zigbee2MQTT add-on (it gives up after
+    ~4 failed reconnects, so this is required), then wait up to 90 s for the
+    bridge entity to report "on". All Zigbee devices are offline for ~30-60 s.
+    Refuses to run again within 10 minutes of a previous reboot.
+    """
+    global _zigbee_last_reboot
+    cfg = _load_config().get("zigbee_coordinator") or {}
+    required = ("power_switch", "host", "port", "z2m_addon", "bridge_entity")
+    missing = [k for k in required if not cfg.get(k)]
+    if missing:
+        return {"ok": False, "error": f"zigbee_coordinator in config.yaml is missing: {', '.join(missing)}"}
+    if not str(cfg["power_switch"]).startswith("switch."):
+        return {"ok": False, "error": "zigbee_coordinator.power_switch must be a switch.* entity."}
+
+    now = time.monotonic()
+    if _zigbee_last_reboot is not None and now - _zigbee_last_reboot < _ZIGBEE_REBOOT_COOLDOWN_S:
+        wait = int(_ZIGBEE_REBOOT_COOLDOWN_S - (now - _zigbee_last_reboot))
+        return {"ok": False, "error": f"Coordinator was rebooted recently; refusing for another {wait}s."}
+    _zigbee_last_reboot = now
+
+    switch = {"entity_id": cfg["power_switch"]}
+    steps: list[str] = []
+    start = time.monotonic()
+
+    def mark(msg: str) -> None:
+        steps.append(f"+{time.monotonic() - start:.0f}s {msg}")
+
+    try:
+        try:
+            _ha_service("switch", "turn_off", switch)
+            mark(f"{cfg['power_switch']} off")
+            time.sleep(10)
+        finally:
+            # Power must come back even if turn_off or the wait blew up.
+            _ha_service("switch", "turn_on", switch)
+            mark(f"{cfg['power_switch']} on")
+
+        deadline = time.monotonic() + 60
+        while not _tcp_port_open(cfg["host"], int(cfg["port"])):
+            if time.monotonic() > deadline:
+                mark("coordinator port still closed after 60s")
+                return {"ok": False, "error": "Coordinator did not come back; Zigbee2MQTT not restarted.", "steps": steps}
+            time.sleep(3)
+        mark(f"{cfg['host']}:{cfg['port']} open")
+
+        time.sleep(2)
+        _ha_service("hassio", "addon_restart", {"addon": cfg["z2m_addon"]})
+        mark(f"{cfg['z2m_addon']} restart requested")
+
+        deadline = time.monotonic() + 90
+        bridge = cfg["bridge_entity"]
+        while True:
+            try:
+                state = _ha_request("GET", f"/states/{_url_quote(bridge)}").json().get("state")
+            except (_requests.RequestException, ValueError):
+                state = None
+            if state == "on":
+                mark(f"{bridge} on")
+                return {"ok": True, "steps": steps}
+            if time.monotonic() > deadline:
+                mark(f"{bridge} still '{state}' after 90s")
+                return {"ok": False, "error": "Zigbee2MQTT bridge did not reconnect within 90s.", "steps": steps}
+            time.sleep(5)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "steps": steps}
+    except _requests.RequestException as exc:
+        return {"ok": False, "error": str(exc), "steps": steps}
+
+
 @_tool
 def ha_render_template(template: str) -> dict:
     """
