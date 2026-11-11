@@ -3745,9 +3745,13 @@ def ha_get_history(entity_id: str, hours: int = 24) -> dict:
         hours: How many hours of history to fetch (default 24).
     """
     try:
-        start = datetime.now(timezone.utc) - timedelta(hours=max(int(hours), 1))
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(hours=max(int(hours), 1))
         params = {
             "filter_entity_id": entity_id,
+            # HA defaults end_time to start + 1 day when omitted, which silently
+            # truncated any hours > 24 to the window's first day (2026-11-11).
+            "end_time": now.isoformat(),
             "minimal_response": "true",
             "no_attributes": "true",
         }
@@ -3763,13 +3767,20 @@ def ha_get_history(entity_id: str, hours: int = 24) -> dict:
                     "state": entry.get("state"),
                     "last_changed": entry.get("last_changed") or entry.get("last_updated"),
                 })
-        return {
+        result = {
             "ok": True,
             "entity_id": entity_id,
             "hours": hours,
             "count": len(changes),
             "history": changes,
         }
+        if not changes:
+            result["note"] = (
+                "No recorded history. The entity may not exist, or may be excluded "
+                "from the HA recorder (e.g. the whole media_player domain is excluded "
+                "in configuration.yaml). Use ha_get_state for its current state."
+            )
+        return result
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "entity_id": entity_id}
     except _requests.RequestException as exc:
@@ -3787,8 +3798,15 @@ def ha_get_logbook(hours: int = 4) -> dict:
         hours: How many hours back to fetch (default 4).
     """
     try:
-        start = datetime.now(timezone.utc) - timedelta(hours=max(int(hours), 1))
-        resp = _ha_request("GET", f"/logbook/{_url_quote(start.isoformat())}")
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(hours=max(int(hours), 1))
+        # HA defaults end_time to start + 1 day when omitted (same bug as
+        # ha_get_history): hours > 24 returned only the window's first day.
+        resp = _ha_request(
+            "GET",
+            f"/logbook/{_url_quote(start.isoformat())}",
+            params={"end_time": now.isoformat()},
+        )
         data = resp.json()
         entries = [
             {
