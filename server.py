@@ -8,6 +8,8 @@ Connects to remote hosts via SSH using paramiko.
 from __future__ import annotations
 
 import base64
+import functools
+import inspect
 import io
 import json
 import logging
@@ -140,9 +142,58 @@ _ENABLED_TOOLS: frozenset[str] | None = (
 )
 
 
+# Tools whose output is NOT passed through _redact_output: the API proxy
+# tools already redact (_api_parse_response); screenshots return images.
+_OUTPUT_REDACT_EXEMPT = frozenset({
+    "homelab_api_get", "homelab_api_post", "homelab_api_mutate",
+    "get_screenshot", "list_screenshots",
+})
+# Writer tools: arguments that must not carry a redaction marker. Writing
+# back redacted output (read_file -> write_file) would replace the real
+# credential on disk with the marker text.
+_WRITER_ARGS = {
+    "write_file": ("content",),
+    "patch_file": ("new_string",),
+    "regex_patch_file": ("replacement",),
+}
+
+
+def _with_output_redaction(fn):
+    """Wrap a tool: refuse redaction markers in writer args, redact output.
+
+    2026-11-24: tool output (ssh_exec, docker logs, loki, http_get, ha_*,
+    read_file, ...) was returned verbatim -- only the API proxy redacted.
+    Every registered tool now gets the _redact_json rules plus
+    _redact_output_text, with the count in `output_secrets_redacted`.
+    Wrapping in _tool means a newly added tool is covered by default.
+    """
+    name = fn.__name__
+    writer_args = _WRITER_ARGS.get(name, ())
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if writer_args:
+            bound = inspect.signature(fn).bind_partial(*args, **kwargs)
+            for arg in writer_args:
+                try:
+                    _check_no_redaction_markers(bound.arguments.get(arg), f"Argument '{arg}'")
+                except ValueError as exc:
+                    return {"ok": False, "error": str(exc)}
+        result = fn(*args, **kwargs)
+        if name in _OUTPUT_REDACT_EXEMPT:
+            return result
+        if isinstance(result, (dict, list, str)):
+            result, n = _redact_output(result)
+            if n and isinstance(result, dict):
+                result["output_secrets_redacted"] = n
+        return result
+
+    return wrapper
+
+
 def _tool(fn):
     if _ENABLED_TOOLS is None or fn.__name__ in _ENABLED_TOOLS:
-        return mcp.tool()(fn)
+        return mcp.tool()(_with_output_redaction(fn))
     return fn
 
 
@@ -4325,7 +4376,7 @@ def _redact_text(text: str) -> tuple[str, int]:
     return text, count
 
 
-def _redact_secret_value(value) -> tuple[Any, int]:
+def _redact_secret_value(value, _text=None) -> tuple[Any, int]:
     """Replace a value held under a secret key. Strings (and strings inside
     a list) are replaced; anything else is walked normally."""
     if isinstance(value, str):
@@ -4335,15 +4386,19 @@ def _redact_secret_value(value) -> tuple[Any, int]:
     if isinstance(value, list):
         out, n = [], 0
         for item in value:
-            item, k = _redact_secret_value(item)
+            item, k = _redact_secret_value(item, _text)
             out.append(item)
             n += k
         return out, n
-    return _redact_json(value)
+    return _redact_json(value, 0, _text)
 
 
-def _redact_json(obj, _depth: int = 0) -> tuple[Any, int]:
-    """Walk parsed JSON, redacting third-party credentials. Returns (obj, count)."""
+def _redact_json(obj, _depth: int = 0, _text=None) -> tuple[Any, int]:
+    """Walk parsed JSON, redacting third-party credentials. Returns (obj, count).
+
+    `_text` is applied to plain strings: _redact_text by default;
+    _redact_output passes the stricter _redact_output_text."""
+    _text = _text or _redact_text
     if _depth > 64:
         return obj, 0
     if isinstance(obj, dict):
@@ -4357,16 +4412,16 @@ def _redact_json(obj, _depth: int = 0) -> tuple[Any, int]:
         out, n = {}, 0
         for k, v in obj.items():
             if _secret_key(k) or (nv_secret and k == "value"):
-                v, c = _redact_secret_value(v)
+                v, c = _redact_secret_value(v, _text)
             else:
-                v, c = _redact_json(v, _depth + 1)
+                v, c = _redact_json(v, _depth + 1, _text)
             out[k] = v
             n += c
         return out, n
     if isinstance(obj, list):
         out, n = [], 0
         for item in obj:
-            item, c = _redact_json(item, _depth + 1)
+            item, c = _redact_json(item, _depth + 1, _text)
             out.append(item)
             n += c
         return out, n
@@ -4378,11 +4433,67 @@ def _redact_json(obj, _depth: int = 0) -> tuple[Any, int]:
             except Exception:
                 inner = None
             if isinstance(inner, (dict, list)):
-                inner, c = _redact_json(inner, _depth + 1)
+                inner, c = _redact_json(inner, _depth + 1, _text)
                 if c:
                     return json.dumps(inner, separators=(",", ":")), c
-        return _redact_text(obj)
+        return _text(obj)
     return obj, 0
+
+
+# `key: value` (YAML, logs) and `KEY=value` (env files, compose, INI) lines
+# whose key names a credential. Values that are indirections (${VAR},
+# {{ jinja }}, lookup(), vault, file paths), booleans, numbers, null, block
+# scalar markers and existing masks are left alone.
+_TXT_KV_RE = _re.compile(
+    r"(?im)^(?P<pre>[-+ ]?\s*(?:export\s+)?[\"']?(?P<key>[\w.-]*"
+    r"(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|"
+    r"private[_-]?key|nzb[_-]?key|passphrase|webhook[_-]?url)"
+    r"[\w.-]*)[\"']?[ \t]*[:=][ \t]*)(?P<value>[^\r\n]*?)[ \t]*$"
+)
+_TXT_KV_SAFE_RE = _re.compile(
+    r"^(?:[\"']?(?:\$\{.*|\{\{.*|lookup\(.*|!vault.*|vault_.*|true|false|yes|no|"
+    r"on|off|null|none|~|-?\d+(?:\.\d+)?|\*+|\[REDACTED[^\]]*\].*|\[SCRUBBED[^\]]*\].*|"
+    r"/\S*|\./\S*|~/\S*|[|>][-+]?)?[\"',]{0,2})?$",
+    _re.I,
+)
+
+
+def _secret_key_allowed(key: str) -> bool:
+    """Credential-shaped key names that are flags or cursors, not secrets."""
+    k = _re.sub(r"[-_.\s]", "", key).lower()
+    return k in _SECRET_KEY_ALLOW or k.startswith(("has", "is", "use", "enable", "require"))
+
+
+def _redact_output_text(text: str) -> tuple[str, int]:
+    """_redact_text plus URL query creds, PEM/AWS keys and credential
+    `key: value` / `KEY=value` lines -- for raw tool output (logs, files,
+    command output), where secrets aren't in structured JSON."""
+    if not isinstance(text, str) or not text:
+        return text, 0
+    text, n = _redact_text(text)
+    text, c = _redact_url_credentials(text)
+    n += c
+    text, c = _SECRET_PEM_RE.subn("[REDACTED-possible-secret: private key block]", text)
+    n += c
+    text, c = _SECRET_AWS_KEY_RE.subn("[REDACTED-possible-secret: AWS key]", text)
+    n += c
+
+    def _kv(m: _re.Match) -> str:
+        nonlocal n
+        val = m.group("value")
+        if _TXT_KV_SAFE_RE.match(val.strip()) or _secret_key_allowed(m.group("key")):
+            return m.group(0)
+        n += 1
+        return m.group("pre") + _REDACTED
+
+    text = _TXT_KV_RE.sub(_kv, text)
+    return text, n
+
+
+def _redact_output(obj) -> tuple[Any, int]:
+    """Redact a tool result (dict/list/str): the JSON rules, with
+    _redact_output_text for every string."""
+    return _redact_json(obj, 0, _redact_output_text)
 
 
 _REDACTION_MARKERS = ("[REDACTED-BY-PROXY]", "[REDACTED-possible-secret", "[SCRUBBED:")
