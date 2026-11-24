@@ -54,6 +54,13 @@ Never run commands or read files that would expose credentials in context:
   to test something) take effect on the next call with **no container
   restart**. This does not apply to env vars (`.env` / `/etc/homelab/*.env`),
   which are only read at container start.
+- **Hot reload only works for in-place writes.** config.yaml is a single-file
+  bind mount, which pins the inode. An editor that saves by writing a new
+  file and renaming it over the old one (Claude Code's Edit/Write tools do
+  this) leaves every container on the OLD file until
+  `docker compose up -d --force-recreate` (found 2026-11-24, when a new
+  path_denylist silently didn't apply). After any config.yaml edit, check
+  `docker exec homelab-mcp grep -c '<new text>' /app/config.yaml`.
 - Only `server.py` changes require a rebuild — that's real Python code, it
   can't hot-reload. After editing it: `docker compose up -d --build`
 - After a rebuild, check `docker logs homelab-mcp | tail -20` for
