@@ -21,6 +21,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import parse_qsl as _parse_qsl
 from urllib.parse import quote as _url_quote
 from urllib.parse import unquote as _url_unquote
 from urllib.parse import urlparse as _urlparse
@@ -4045,6 +4046,77 @@ def _api_check_denylist(cfg: dict, path: str) -> None:
             )
 
 
+def _api_query_values(path: str, params: dict | None) -> dict[str, list[str]]:
+    """All query values a request will carry, keyed by lowercased name: the
+    params dict plus any query string written into `path` itself
+    (percent-decoded repeatedly, like _api_canonical_path)."""
+    found: dict[str, list[str]] = {}
+
+    def add(k, v):
+        vals = v if isinstance(v, (list, tuple)) else [v]
+        for x in vals:
+            if isinstance(x, bool):
+                x = "true" if x else "false"
+            found.setdefault(str(k).strip().lower(), []).append(str(x).strip().lower())
+
+    p = path
+    for _ in range(5):
+        decoded = _url_unquote(p)
+        if decoded == p:
+            break
+        p = decoded
+    if "?" in p:
+        for k, v in _parse_qsl(p.split("?", 1)[1].split("#", 1)[0], keep_blank_values=True):
+            add(k, v)
+    for k, v in (params or {}).items():
+        add(k, v)
+    return found
+
+
+def _api_check_param_denylist(cfg: dict, path: str, params: dict | None) -> None:
+    """Raise ValueError if a query parameter value is denied for this service.
+
+    path_denylist can't express SABnzbd, which routes everything through
+    `?mode=` (mode=get_config returns usenet server passwords, nzb_key and the
+    web UI password -- 2026-11-24). Config shape:
+
+        param_denylist:
+          - param: mode
+            values: [get_config, set_config]
+            unless:              # allowed only if EVERY listed param is
+              section: [misc]    # present and ALL its values are listed
+              keyword: [complete_dir, download_dir]
+
+    Matching is case-insensitive on names and values; a value in the path's
+    own query string counts the same as one in params.
+    """
+    rules = cfg.get("param_denylist") or []
+    if not rules:
+        return
+    found = _api_query_values(path, params)
+    for rule in rules:
+        name = str(rule.get("param", "")).lower()
+        denied = {str(v).lower() for v in rule.get("values", [])}
+        hit = [v for v in found.get(name, []) if v in denied]
+        if not hit:
+            continue
+        unless = rule.get("unless") or {}
+        if unless and all(
+            found.get(str(k).lower())
+            and all(v in {str(a).lower() for a in allowed} for v in found[str(k).lower()])
+            for k, allowed in unless.items()
+        ):
+            continue
+        hint = ""
+        if unless:
+            hint = f" Allowed only with: {unless}."
+        raise ValueError(
+            f"Query parameter {name}={hit[0]} is blocked by param_denylist: its "
+            f"response contains credentials the proxy cannot redact.{hint} "
+            "Use the service's own UI for it."
+        )
+
+
 def _api_query_value(v):
     """Render a query param value the way JSON-minded APIs expect."""
     if isinstance(v, bool):
@@ -4059,6 +4131,7 @@ def _api_build_request(cfg: dict, path: str, params: dict | None) -> tuple[str, 
     base_url = cfg["base_url"].rstrip("/")
     path, note = _api_normalize_path(base_url, path)
     _api_check_denylist(cfg, path)
+    _api_check_param_denylist(cfg, path, params)
     url = base_url + path
     headers: dict = {}
     # requests renders a Python bool as "True"/"False", which strict APIs
@@ -4121,6 +4194,220 @@ def _redact_url_credentials(text: str) -> tuple[str, int]:
     return _URL_CRED_PARAM_RE.subn(r"\1[REDACTED-BY-PROXY]", text)
 
 
+# ---------------------------------------------------------------------------
+# Field-level redaction of third-party credentials in structured output.
+#
+# 2026-11-24: Sportarr GET /downloadclient returned the SABnzbd client's
+# password in plaintext -- a credential for ANOTHER service, which neither
+# _api_secrets (only knows the proxy's own key) nor _redact_url_credentials
+# (only URL query params) could see. See holocron
+# incident-2026-11-24-sportarr-downloadclient-password.
+#
+# Rules, applied to parsed JSON (_redact_json) and to every string in it
+# (_redact_text):
+#   * key rule -- the key, lowercased with `_`/`-`/`.` removed, is in
+#     _SECRET_KEY_EXACT or ends in one of _SECRET_KEY_SUFFIXES, and is not in
+#     _SECRET_KEY_ALLOW. `pass` is exact-only (bypass, compass).
+#   * name/value rule -- a dict carrying "value" plus a "name"/"key" string
+#     (the *arr provider `fields` arrays, Tautulli notifier config, n8n
+#     header parameters) has its value redacted when the name passes the key
+#     rule, or when the *arr schema's `privacy` says password/apiKey.
+#   * only non-empty strings are replaced (also strings inside a list under
+#     a secret key). Booleans, numbers, null, "", all-`*` masks and existing
+#     redaction markers are left alone -- so `hasPassword: true`,
+#     `passwordRequired`, `tokenType` and `apiKey: "********"` stay as-is.
+#   * string patterns -- URL userinfo passwords, Apprise token-in-path
+#     schemes, Discord/Slack/Teams/Telegram webhook URLs, Bearer and
+#     Authorization values, tracker passkeys, and XML elements whose tag
+#     passes the key rule. A string that is itself JSON is redacted
+#     recursively and re-serialized.
+#
+# Deliberately broad: a false positive blanks a harmless value Claude reads;
+# a false negative puts a credential in a transcript.
+# ---------------------------------------------------------------------------
+_REDACTED = "[REDACTED-BY-PROXY]"
+
+_SECRET_KEY_EXACT = frozenset({
+    "password", "passwd", "pass", "pwd", "secret", "token", "apikey",
+    "apitoken", "accesstoken", "refreshtoken", "idtoken", "authtoken",
+    "clientsecret", "privatekey", "secretkey", "accesskey", "signingkey",
+    "encryptionkey", "cookie", "cookies", "authorization", "bottoken",
+    "webhook", "webhookurl", "nzbkey", "passkey", "plextoken", "passphrase",
+    "credentials", "sessionid", "sessiontoken",
+})
+_SECRET_KEY_SUFFIXES = (
+    "password", "passwd", "pwd", "secret", "token", "apikey", "privatekey",
+    "accesskey", "webhookurl", "passphrase",
+)
+# Keys that match a suffix but hold no credential and are needed to work
+# (pagination cursors -- redacting them breaks paging).
+_SECRET_KEY_ALLOW = frozenset({
+    "nextpagetoken", "pagetoken", "continuationtoken", "synctoken",
+    "cursortoken", "maxtoken", "maxtokens",
+})
+# *arr provider-schema field privacy levels that mark a secret.
+_SECRET_PRIVACY = frozenset({"password", "apikey"})
+
+_ALREADY_MASKED_RE = _re.compile(
+    r"^(?:\*+|\[REDACTED[^\]]*\]|\[SCRUBBED[^\]]*\]|<redacted>|redacted)$", _re.I
+)
+
+
+def _secret_key(key) -> bool:
+    if not isinstance(key, str):
+        return False
+    k = _re.sub(r"[-_.\s]", "", key).lower()
+    if not k or k in _SECRET_KEY_ALLOW:
+        return False
+    return k in _SECRET_KEY_EXACT or k.endswith(_SECRET_KEY_SUFFIXES)
+
+
+# userinfo password: scheme://user:PASS@host
+_TXT_USERINFO_RE = _re.compile(
+    r"(?i)(\b[a-z][a-z0-9+.-]*://[^\s:/@\"'<>]*:)([^\s@/\"'<>]+)(@)"
+)
+# Apprise schemes whose path IS the credential (bot tokens, webhook tokens,
+# user/app keys). json://, xml://, form://, ntfy:// are not here: their path
+# is a hostname/topic, and their credentials are userinfo (caught above).
+_TXT_APPRISE_RE = _re.compile(
+    r"(?i)\b((?:tgram|discord|slack|pover|pushover|gotifys?|matrixs?|pbul|"
+    r"pushbullet|join|ifttt|mailgun|sendgrid|twilio|prowl|mmosts?|rockets?|"
+    r"zulip|msteams|wxteams|opsgenie|pagerduty|spush|signals?|lametric|barks?|"
+    r"pushed|line|kumulos|apprises?|pushsafer|psafers?|notica|simplepush|"
+    r"techulus|push|reddit|twist|guilded|revolt|flock|dapnet|clicksend|"
+    r"bulksms|d7sms|kavenegar|msg91|sinch|vonage|nexmo)://)([^\s\"'<>?]+)"
+)
+_TXT_WEBHOOK_RE = _re.compile(
+    r"(?i)(https?://(?:[a-z0-9-]+\.)*(?:discord(?:app)?\.com/api/webhooks|"
+    r"hooks\.slack\.com/(?:services|workflows|triggers)|"
+    r"[a-z0-9-]+\.webhook\.office\.com/webhookb2|"
+    r"api\.telegram\.org/(?:file/)?bot)/?)([^\s\"'<>?]+)"
+)
+_TXT_BEARER_RE = _re.compile(r"(?i)(\bBearer\s+)([A-Za-z0-9_\-+/=.~]{8,})")
+_TXT_AUTHZ_RE = _re.compile(
+    r"(?i)(\b(?:Proxy-)?Authorization[\"']?\s*[:=]\s*[\"']?(?:Basic|Token|Bot|Digest)\s+)"
+    r"([A-Za-z0-9_\-+/=.~]+)"
+)
+# Private-tracker passkeys live in the announce PATH, which the query-param
+# pass can't see; also in magnet `tr=` (percent-encoded).
+_TXT_PASSKEY_RE = _re.compile(r"(?i)(/|%2F)([a-z0-9]{24,64})((?:/|%2F)announce)")
+_TXT_XML_RE = _re.compile(r"<([A-Za-z_][\w.-]*)>([^<]+)</\1>")
+
+
+def _redact_text(text: str) -> tuple[str, int]:
+    """Redact credential-shaped substrings in free text. Returns (text, count)."""
+    if not isinstance(text, str) or not text:
+        return text, 0
+    count = 0
+
+    def _sub(m: _re.Match) -> str:
+        nonlocal count
+        val = m.group(2)
+        if _ALREADY_MASKED_RE.match(val) or _REDACTED in val:
+            return m.group(0)
+        count += 1
+        tail = m.group(3) if m.re.groups >= 3 else ""
+        return m.group(1) + _REDACTED + (tail or "")
+
+    for rx in (_TXT_USERINFO_RE, _TXT_APPRISE_RE, _TXT_WEBHOOK_RE,
+               _TXT_BEARER_RE, _TXT_AUTHZ_RE, _TXT_PASSKEY_RE):
+        text = rx.sub(_sub, text)
+
+    def _xml_sub(m: _re.Match) -> str:
+        nonlocal count
+        val = m.group(2).strip()
+        if not _secret_key(m.group(1)) or not val or _ALREADY_MASKED_RE.match(val):
+            return m.group(0)
+        count += 1
+        return f"<{m.group(1)}>{_REDACTED}</{m.group(1)}>"
+
+    text = _TXT_XML_RE.sub(_xml_sub, text)
+    return text, count
+
+
+def _redact_secret_value(value) -> tuple[Any, int]:
+    """Replace a value held under a secret key. Strings (and strings inside
+    a list) are replaced; anything else is walked normally."""
+    if isinstance(value, str):
+        if not value.strip() or _ALREADY_MASKED_RE.match(value.strip()):
+            return value, 0
+        return _REDACTED, 1
+    if isinstance(value, list):
+        out, n = [], 0
+        for item in value:
+            item, k = _redact_secret_value(item)
+            out.append(item)
+            n += k
+        return out, n
+    return _redact_json(value)
+
+
+def _redact_json(obj, _depth: int = 0) -> tuple[Any, int]:
+    """Walk parsed JSON, redacting third-party credentials. Returns (obj, count)."""
+    if _depth > 64:
+        return obj, 0
+    if isinstance(obj, dict):
+        name = obj.get("name") if isinstance(obj.get("name"), str) else obj.get("key")
+        privacy = obj.get("privacy")
+        nv_secret = "value" in obj and (
+            _secret_key(name)
+            or (isinstance(name, str) and _secret_key(name.rsplit(".", 1)[-1]))
+            or (isinstance(privacy, str) and privacy.lower() in _SECRET_PRIVACY)
+        )
+        out, n = {}, 0
+        for k, v in obj.items():
+            if _secret_key(k) or (nv_secret and k == "value"):
+                v, c = _redact_secret_value(v)
+            else:
+                v, c = _redact_json(v, _depth + 1)
+            out[k] = v
+            n += c
+        return out, n
+    if isinstance(obj, list):
+        out, n = [], 0
+        for item in obj:
+            item, c = _redact_json(item, _depth + 1)
+            out.append(item)
+            n += c
+        return out, n
+    if isinstance(obj, str):
+        s = obj.strip()
+        if s[:1] in ("{", "[") and len(s) > 1:
+            try:
+                inner = json.loads(s)
+            except Exception:
+                inner = None
+            if isinstance(inner, (dict, list)):
+                inner, c = _redact_json(inner, _depth + 1)
+                if c:
+                    return json.dumps(inner, separators=(",", ":")), c
+        return _redact_text(obj)
+    return obj, 0
+
+
+_REDACTION_MARKERS = ("[REDACTED-BY-PROXY]", "[REDACTED-possible-secret", "[SCRUBBED:")
+
+
+def _check_no_redaction_markers(body, what: str = "Request body") -> None:
+    """Refuse to send/write content that contains a redaction marker.
+
+    A GET whose secrets were redacted, edited and PUT back, would overwrite the
+    stored credential with the literal marker text.
+    """
+    if body is None:
+        return
+    text = body if isinstance(body, str) else json.dumps(body, default=str)
+    for marker in _REDACTION_MARKERS:
+        if marker in text:
+            raise ValueError(
+                f"{what} contains the redaction marker '{marker}'. Sending it "
+                "would overwrite the real stored credential with the marker "
+                "text. Send only the fields you are changing (if the API "
+                "allows a partial update), or make this change in the "
+                "service's own UI."
+            )
+
+
 def _api_parse_response(cfg: dict, resp) -> dict:
     """Parse an upstream HTTP response, scrubbing credentials from the body.
 
@@ -4138,13 +4425,29 @@ def _api_parse_response(cfg: dict, resp) -> dict:
     for secret in _api_secrets(cfg):
         raw = raw.replace(secret, "[REDACTED-BY-PROXY]")
     raw, n_url = _redact_url_credentials(raw)
+    n_json = n_text = 0
     try:
         data = json.loads(raw)
     except Exception:
-        data = raw
+        data = None
+        parsed = False
+    else:
+        parsed = True
+    if parsed:
+        # Third pass: credentials for OTHER services held in JSON fields
+        # (2026-11-24 Sportarr /downloadclient), see _redact_json.
+        data, n_json = _redact_json(data)
+    else:
+        data, n_text = _redact_text(raw)
+        data, n_kv = _redact_possible_secrets(data)
+        n_text += n_kv
     result = {"ok": resp.ok, "status": resp.status_code, "data": data}
     if n_url:
         result["url_credentials_redacted"] = n_url
+    if n_json:
+        result["json_fields_redacted"] = n_json
+    if n_text:
+        result["text_secrets_redacted"] = n_text
     return result
 
 
@@ -4197,6 +4500,7 @@ def homelab_api_post(service: str, path: str, body: Optional[dict] = None) -> di
         body: Optional JSON request body as a dict.
     """
     try:
+        _check_no_redaction_markers(body)
         cfg = _api_svc_cfg(service)
         allowlist: list[str] = cfg.get("post_allowlist", [])
         if not allowlist:
@@ -4270,6 +4574,7 @@ def homelab_api_mutate(
         method = method.upper()
         if method not in ("PUT", "PATCH", "DELETE"):
             return {"ok": False, "error": f"Method '{method}' not permitted. Use PUT, PATCH, or DELETE."}
+        _check_no_redaction_markers(body)
         cfg = _api_svc_cfg(service)
         url, headers, resolved_params, note = _api_build_request(cfg, path, {})
         headers["Content-Type"] = "application/json"

@@ -175,6 +175,16 @@ api_services:
     auth_param: apikey        # used when auth_style: query_param
     auth_env: SABNZBD_API_KEY
     # No post_allowlist — SABnzbd uses GET ?mode= for everything
+    # param_denylist: path_denylist for services that route by query param.
+    # Denied when `param` has one of `values` (also inside the path's own
+    # query string), unless EVERY param under `unless` is present with only
+    # listed values. get_config returns usenet server passwords and keys.
+    param_denylist:
+      - param: mode
+        values: [get_config, set_config, set_config_default, del_config, config]
+        unless:
+          section: [misc]
+          keyword: [complete_dir, download_dir]
 
   # --- Bazarr (read-only, with a path_denylist) ---
   # path_denylist refuses every method on these paths (and anything below
