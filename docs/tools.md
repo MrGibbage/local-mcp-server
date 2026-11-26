@@ -130,4 +130,4 @@ rather than retried on every call — see [configuration.md](configuration.md).
 | Tool | Description |
 |---|---|
 | `holocron_git_status` | Git status + last-commit age for the holocron clone on one host (read-only) |
-| `holocron_sync_push` | Run the existing add/commit/pull --rebase/push sync script on one host — requires `confirmed=true` |
+| `holocron_sync_push` | Run the holocron sync script on one host: fetch, fast-forward, push existing commits. **Never commits** — commit first; result carries a `warning` when files were left uncommitted — requires `confirmed=true` |

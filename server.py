@@ -5223,10 +5223,16 @@ def holocron_git_status(host: str) -> dict:
 @_tool
 def holocron_sync_push(host: str, confirmed: bool = False) -> dict:
     """
-    Run the existing holocron sync script in manual mode on one host: add -A,
-    commit, pull --rebase, push. Never constructs git commands directly —
-    shells out to the same script /sync-holocron and holocron-audit's nightly
-    Step 6 already invoke, at a hardcoded path per host.
+    Run the existing holocron sync script on one host: fetch, fast-forward
+    merge, and push commits that ALREADY EXIST. It NEVER commits — since the
+    2026-09-21 redesign the script's no-flag mode does no `add`/`commit` at
+    all, so uncommitted edits are left in the working tree and NOT published.
+    Commit your changes first (explicit paths + a real message), then call
+    this. If the result has a "warning" key, files were left uncommitted.
+
+    Never constructs git commands directly — shells out to the same script
+    /sync-holocron and holocron-audit's nightly Step 6 already invoke, at a
+    hardcoded path per host.
 
     Requires confirmed=True — only set this after the user has explicitly
     approved syncing (pushing) holocron on this specific host in the current
@@ -5260,13 +5266,32 @@ def holocron_sync_push(host: str, confirmed: bool = False) -> dict:
         command = shlex.quote(script)
 
     result = _ssh_exec(host_cfg, command, timeout=90, wrap=not hc["windows"])
-    return {
+    out = {
         "ok": result["exit_code"] == 0,
         "host": host,
         "exit_code": result["exit_code"],
         "stdout": result["stdout"],
         "stderr": result["stderr"],
     }
+    # The script never commits, so "Sync complete ... dirty=N" with N > 0 means
+    # work was left behind unpublished. Surface that explicitly: on 2026-11-26 a
+    # caller read ok=true as "pushed" when the edit was still uncommitted.
+    dirty = _sync_dirty_count(result["stdout"])
+    if dirty:
+        out["dirty"] = dirty
+        out["warning"] = (
+            f"{dirty} uncommitted file(s) in the holocron working tree were NOT "
+            "pushed — this tool never commits. Commit them with explicit paths "
+            "and a real message, then sync again."
+        )
+    return out
+
+
+def _sync_dirty_count(stdout: str) -> int:
+    """Parse dirty=N from the sync script's final summary line (both the .sh
+    and .ps1 twins print 'Sync complete - behind=X ahead=Y dirty=N')."""
+    matches = _re.findall(r"Sync complete\b.*?\bdirty=(\d+)", stdout or "")
+    return int(matches[-1]) if matches else 0
 
 
 # ---------------------------------------------------------------------------
